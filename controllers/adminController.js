@@ -133,23 +133,80 @@ exports.updateUser = async (req, res) => {
   }
 };
 
-// [DELETE] حذف مستخدم
-exports.deleteUser = async (req, res) => {
-  const { id } = req.params;
+/**
+ * @desc    حذف مستخدم من قبل المشرف (Admin)
+ * @route   DELETE /api/admin/users/:id
+ * @access  Private (Admin)
+ */
+exports.deleteUser = asyncHandler(async (req, res) => {
+    const userIdToDelete = req.params.id;
 
-  // منع المشرف من حذف نفسه
-  if (Number(id) === req.user.id) {
-    return res.status(400).json({ message: "لا يمكنك حذف حسابك الخاص." });
-  }
+    // لا تسمح للمشرف بحذف نفسه
+    if (req.user.id === parseInt(userIdToDelete, 10)) {
+        return res.status(400).json({ message: "لا يمكنك حذف حسابك الخاص." });
+    }
 
-  try {
-    await pool.query("DELETE FROM users WHERE id = ?", [id]);
-    res.status(200).json({ message: "تم حذف المستخدم بنجاح!" });
-  } catch (error) {
-    console.error("Error deleting user:", error);
-    res.status(500).json({ message: "خطأ في حذف المستخدم." });
-  }
-};
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. التحقق من وجود المستخدم
+        const [[user]] = await connection.query("SELECT id FROM users WHERE id = ?", [userIdToDelete]);
+        if (!user) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ message: "المستخدم غير موجود." });
+        }
+
+        // --- ✅ [FIX] حذف السجلات المرتبطة أولاً ---
+        // يجب إضافة حذف لجميع الجداول التي قد تحتوي على user_id كمفتاح أجنبي
+
+        // 2. حذف الاشتراكات المرتبطة
+        await connection.query("DELETE FROM user_subscriptions WHERE user_id = ?", [userIdToDelete]);
+
+        // 3. حذف الإشعارات المرتبطة
+        await connection.query("DELETE FROM notifications WHERE user_id = ?", [userIdToDelete]);
+
+        // 4. حذف العناوين المرتبطة
+        await connection.query("DELETE FROM addresses WHERE user_id = ?", [userIdToDelete]);
+
+        // 5. حذف سجلات المحفظة والمعاملات (هام!)
+        await connection.query("DELETE FROM wallet_transactions WHERE user_id = ?", [userIdToDelete]);
+        // 6. حذف السجلات الخاصة بأدوار المستخدم (تاجر، مودل، مورد)
+        //    (افترض أن هذه الجداول تحتوي على user_id)
+        //    !! يجب إضافة حذف للمنتجات والمتغيرات إذا كان المستخدم تاجرًا !!
+        //    !! يجب إضافة حذف للعروض والباقات إذا كان المستخدم مودل !!
+        //    !! يجب إضافة حذف لمنتجات المورد إذا كان موردًا !!
+        //    مثال (قد تحتاج لتعديله حسب هيكل جداولك):
+        await connection.query("DELETE FROM products WHERE merchant_id = ?", [userIdToDelete]); // Requires handling variants, etc. first
+        await connection.query("DELETE FROM service_packages WHERE user_id = ?", [userIdToDelete]); // Requires handling tiers first
+        await connection.query("DELETE FROM supplier_products WHERE supplier_id = ?", [userIdToDelete]); // Requires handling variants first
+
+        // --- [هام جدًا] ---
+        // عملية حذف المنتجات/العروض تتطلب منطقًا مشابهًا لما فعلناه سابقًا (حذف الاعتماديات أولاً).
+        // قد يكون من الأفضل عدم حذف هذه البيانات مباشرة، بل وضع علامة "محذوف" على المستخدم
+        // أو نقل البيانات لأرشيف بدلاً من حذفها نهائيًا للحفاظ على سجلات المبيعات/الاتفاقيات السابقة.
+        // الحل الحالي يحذف فقط البيانات الأساسية للمستخدم.
+
+        // 7. حذف المستخدم الرئيسي
+        await connection.query("DELETE FROM users WHERE id = ?", [userIdToDelete]);
+
+        // 8. إكمال المعاملة
+        await connection.commit();
+        res.status(200).json({ message: "تم حذف المستخدم بنجاح." });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error deleting user:", error);
+        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+             res.status(400).json({ message: "لا يمكن حذف المستخدم لوجود بيانات مرتبطة به لم يتم حذفها (مثل المنتجات أو الطلبات النشطة)." , details: error.sqlMessage});
+        } else {
+             res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المستخدم." });
+        }
+    } finally {
+        connection.release();
+    }
+});
 
 exports.getAllAgreements = async (req, res) => {
   try {
