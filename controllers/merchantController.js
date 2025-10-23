@@ -947,52 +947,87 @@ exports.promoteProduct = asyncHandler(async (req, res) => {
   res.json({ checkoutUrl: session.url });
 });
 
-// @desc    Delete a product
-// @route   DELETE /api/merchants/products/:id
-// @access  Private/Merchant
+/**
+ * @desc    حذف منتج خاص بالتاجر (بما في ذلك منتجات الدروبشيبينغ)
+ * @route   DELETE /api/merchants/products/:id
+ * @access  Private (Merchant)
+ */
 exports.deleteProduct = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const merchantId = req.user.id;
-  const connection = await pool.getConnection();
+    const { id: productId } = req.params;
+    const merchantId = req.user.id;
+    const connection = await pool.getConnection();
 
-  try {
-    await connection.beginTransaction();
+    try {
+        await connection.beginTransaction();
 
-    const [[product]] = await connection.query(
-      "SELECT * FROM products WHERE id = ? AND merchant_id = ?",
-      [id, merchantId]
-    );
+        // 1. التحقق من أن المنتج ينتمي للتاجر
+        const [[product]] = await connection.query(
+            "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
+            [productId, merchantId]
+        );
 
-    if (!product) {
-      await connection.rollback();
-      connection.release();
-      return res
-        .status(404)
-        .json({ message: "المنتج غير موجود أو لا تملك صلاحية حذفه." });
+        if (!product) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ message: "المنتج غير موجود أو لا تملك صلاحية حذفه." });
+        }
+
+        // --- حذف السجلات المرتبطة بالترتيب الصحيح ---
+
+        // 2. جلب معرفات متغيرات هذا المنتج
+        const [variants] = await connection.query(
+            "SELECT id FROM product_variants WHERE product_id = ?",
+            [productId]
+        );
+        const variantIds = variants.map(v => v.id);
+
+        // 3. حذف الروابط من dropship_links (إذا وجدت)
+        if (variantIds.length > 0) {
+            await connection.query(
+                "DELETE FROM dropship_links WHERE merchant_variant_id IN (?)",
+                [variantIds]
+            );
+        }
+
+        // 4. حذف سجلات الترويج المرتبطة بالمنتج (إذا وجدت)
+        await connection.query("DELETE FROM product_promotions WHERE product_id = ?", [productId]);
+
+        // 5. حذف سجلات الاتفاقيات المرتبطة بالمنتج (إذا وجدت)
+        await connection.query("DELETE FROM agreements WHERE product_id = ?", [productId]);
+
+        // 6. حذف تقييمات المنتج (إذا وجدت)
+        await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [productId]);
+
+        // 7. حذف المنتج من قوائم الرغبات (إذا وجد)
+        await connection.query("DELETE FROM wishlist WHERE product_id = ?", [productId]);
+
+        // 8. حذف متغيرات المنتج (إذا كانت مرتبطة بـ ON DELETE CASCADE، سيتم حذفها تلقائيًا عند حذف المنتج)
+        // ✅ [FIX] تم إزالة السطر الذي يشير إلى الجدول غير الموجود `product_variant_images`
+        if (variantIds.length > 0) {
+            // فقط نحذف المتغيرات نفسها، إذا لم تكن ON DELETE CASCADE
+            // إذا كانت ON DELETE CASCADE، يمكن إزالة هذا السطر أيضًا.
+             await connection.query("DELETE FROM product_variants WHERE product_id = ?", [productId]);
+        }
+
+
+        // 9. الآن يمكننا حذف المنتج الرئيسي بأمان
+        await connection.query("DELETE FROM products WHERE id = ?", [productId]);
+
+        // 10. إكمال المعاملة
+        await connection.commit();
+        res.status(200).json({ message: "تم حذف المنتج وجميع بياناته المرتبطة بنجاح." });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error deleting product:", error);
+        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+             res.status(400).json({ message: "لا يمكن حذف المنتج لوجود بيانات مرتبطة به لم يتم حذفها." , details: error.sqlMessage});
+        } else if (error.code === 'ER_NO_SUCH_TABLE') {
+             res.status(500).json({ message: "خطأ في الخادم: محاولة الوصول إلى جدول غير موجود.", details: error.sqlMessage });
+        } else {
+             res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المنتج." });
+        }
+    } finally {
+        connection.release();
     }
-
-    // ✨ --- الجزء الجديد --- ✨
-    // قبل حذف المنتج، نحذف أي سجلات مرتبطة به في الجداول التي لا تحتوي على ON DELETE CASCADE
-    // هذا الكود هو إجراء احترازي إضافي. تعديل قاعدة البيانات هو الحل الأساسي.
-    await connection.query("DELETE FROM agreements WHERE product_id = ?", [id]);
-    await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [
-      id,
-    ]);
-    await connection.query("DELETE FROM wishlist WHERE product_id = ?", [id]);
-    // لا داعي لحذف product_variants يدوياً لأنها بالفعل ON DELETE CASCADE
-
-    // الآن يمكننا حذف المنتج بأمان
-    await connection.query("DELETE FROM products WHERE id = ?", [id]);
-
-    await connection.commit();
-    res
-      .status(200)
-      .json({ message: "تم حذف المنتج وجميع بياناته المرتبطة بنجاح." });
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error deleting product:", error);
-    res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المنتج." });
-  } finally {
-    connection.release();
-  }
 });
