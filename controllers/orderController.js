@@ -84,80 +84,86 @@ const processOrderItems = async (orderId, cartItems, connection) => {
 
 /**
  * @private
- * @desc    حساب وتسجيل الأرباح المعلقة.
+ * @desc    حساب وتسجيل الأرباح المعلقة مع تتبع مفصل للعمليات.
  */
 const calculateAndRecordEarnings = async (orderId, connection) => {
-  // 1. Fetch all required commission rates from the database at once
-  const [settings] = await connection.query(
-    "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'dropshipping_commission_rate', 'shipping_commission_rate')"
+
+  // 1. جلب نسب العمولة
+  const [settingsRows] = await connection.query(
+    "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'shipping_commission_rate')"
   );
-  const getSetting = (key, defaultValue) =>
-    parseFloat(settings.find((s) => s.setting_key === key)?.setting_value) ||
-    defaultValue;
+  const settings = settingsRows.reduce((acc, row) => {
+    acc[row.setting_key] = parseFloat(row.setting_value);
+    return acc;
+  }, {});
 
-  const commissionRate = getSetting("commission_rate", 10) / 100; // e.g., 0.10
-  const dropshippingCommissionRate =
-    getSetting("dropshipping_commission_rate", commissionRate) / 100;
+  const commissionRate = (settings.commission_rate || 10) / 100;
   const shippingCommissionRate =
-    getSetting("shipping_commission_rate", 15) / 100;
+    (settings.shipping_commission_rate || 10) / 100;
 
-  // 2. Fetch all items in the order with their cost details
+  // 2. جلب منتجات الطلب
   const [items] = await connection.query(
     `SELECT
             oi.quantity, oi.price, p.merchant_id,
             spv.cost_price, sp.supplier_id
-        FROM order_items oi
-        JOIN product_variants pv ON oi.product_variant_id = pv.id
-        JOIN products p ON pv.product_id = p.id
-        LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
-        LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
-        LEFT JOIN supplier_products sp ON spv.product_id = sp.id
-        WHERE oi.order_id = ?`,
+         FROM order_items oi
+         JOIN product_variants pv ON oi.product_variant_id = pv.id
+         JOIN products p ON pv.product_id = p.id
+         LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+         LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+         LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+         WHERE oi.order_id = ?`,
     [orderId]
   );
 
   const earningsMap = new Map();
-  let primaryOwnerId = null; // To determine who gets shipping earnings
+  let primaryOwnerId = null;
 
   for (const item of items) {
-    const saleAmount = Number(item.price) * Number(item.quantity);
     const isDropshipping = !!item.supplier_id;
 
     if (isDropshipping) {
       primaryOwnerId = item.supplier_id;
-      const costAmount = Number(item.cost_price) * Number(item.quantity);
-      const grossProfit = saleAmount - costAmount;
+      const sellingPrice = Number(item.price) * Number(item.quantity);
+      const costPrice = Number(item.cost_price) * Number(item.quantity);
 
-      // Platform commission is taken from the merchant's profit
-      const platformCommission = grossProfit * dropshippingCommissionRate;
-      const netMerchantProfit = grossProfit - platformCommission;
-
-      // Add supplier's earning (full cost price)
-      earningsMap.set(
-        item.supplier_id,
-        (earningsMap.get(item.supplier_id) || 0) + costAmount
-      );
-      // Add merchant's net profit
-      if (netMerchantProfit > 0) {
+      // 1. حساب ربح التاجر الصافي
+      const merchantProfit = sellingPrice - costPrice;
+      if (merchantProfit > 0) {
         earningsMap.set(
           item.merchant_id,
-          (earningsMap.get(item.merchant_id) || 0) + netMerchantProfit
+          (earningsMap.get(item.merchant_id) || 0) + merchantProfit
+        );
+      }
+
+      // 2. حساب عمولة المنصة من سعر تكلفة المورد
+      const platformCommissionOnCost = costPrice * commissionRate;
+
+      // 3. حساب ربح المورد الصافي من المنتج
+      const supplierEarningFromProduct = costPrice - platformCommissionOnCost;
+      if (supplierEarningFromProduct > 0) {
+        earningsMap.set(
+          item.supplier_id,
+          (earningsMap.get(item.supplier_id) || 0) + supplierEarningFromProduct
         );
       }
     } else {
       primaryOwnerId = item.merchant_id;
-      // For regular products, commission is on the total sale amount
-      const platformCommission = saleAmount * commissionRate;
-      const netMerchantEarning = saleAmount - platformCommission;
+      const saleAmount = Number(item.price) * Number(item.quantity);
 
-      earningsMap.set(
-        item.merchant_id,
-        (earningsMap.get(item.merchant_id) || 0) + netMerchantEarning
-      );
+      const platformCommission = saleAmount * commissionRate;
+
+      const merchantEarning = saleAmount - platformCommission;
+      if (merchantEarning > 0) {
+        earningsMap.set(
+          item.merchant_id,
+          (earningsMap.get(item.merchant_id) || 0) + merchantEarning
+        );
+      }
     }
   }
 
-  // 3. Calculate and distribute shipping earnings
+  // 3. حساب وتوزيع أرباح الشحن
   const [[order]] = await connection.query(
     "SELECT shipping_cost FROM orders WHERE id = ?",
     [orderId]
@@ -166,17 +172,18 @@ const calculateAndRecordEarnings = async (orderId, connection) => {
 
   if (shippingCost > 0 && primaryOwnerId) {
     const platformShippingCommission = shippingCost * shippingCommissionRate;
-    const netShippingEarning = shippingCost - platformShippingCommission;
 
+    const netShippingEarning = shippingCost - platformShippingCommission;
     if (netShippingEarning > 0) {
       earningsMap.set(
         primaryOwnerId,
         (earningsMap.get(primaryOwnerId) || 0) + netShippingEarning
       );
     }
+  } else {
+    console.log(`  - No shipping cost or no primary owner to assign it to.`);
   }
 
-  // 4. Record all calculated net earnings in the transactions table
   for (const [userId, amount] of earningsMap.entries()) {
     if (amount > 0) {
       await connection.query(
@@ -186,12 +193,6 @@ const calculateAndRecordEarnings = async (orderId, connection) => {
     }
   }
 };
-
-// ===================================================================================
-//
-//  MAIN CONTROLLER FUNCTIONS 🚀
-//
-// ===================================================================================
 
 /**
  * @private
@@ -223,7 +224,7 @@ exports.createOrderInternal = async (orderPayload) => {
 
     const [orderResult] = await connection.query(
       `INSERT INTO orders (customer_id, status, payment_status, payment_method, total_amount, shipping_address_id, shipping_company_id, shipping_cost, stripe_session_id) 
-             VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
       [
         customerId,
         paymentStatus,
@@ -257,7 +258,6 @@ exports.createOrderInternal = async (orderPayload) => {
  * @access  Private
  */
 exports.createCodOrder = asyncHandler(async (req, res) => {
-  // This is the new function required by your routes
   const { cartItems, shippingAddressId, shipping_company_id, shipping_cost } =
     req.body;
   const customerId = req.user.id;
@@ -273,13 +273,23 @@ exports.createCodOrder = asyncHandler(async (req, res) => {
       .json({ message: "البيانات غير كاملة لإنشاء طلب الدفع عند الاستلام." });
   }
 
-  // We can reuse the createOrder logic, just with specific parameters for COD
-  req.body.paymentMethod = "cod";
-  req.body.paymentStatus = "unpaid";
-  req.body.stripe_session_id = null; // No stripe session for COD
+  const orderPayload = {
+    customerId,
+    cartItems,
+    shippingAddressId,
+    shipping_company_id,
+    shipping_cost,
+    paymentMethod: "cod",
+    paymentStatus: "unpaid",
+    stripe_session_id: null,
+  };
 
-  // Forward the request to the main createOrder function
-  await exports.createOrder(req, res);
+  try {
+    const orderId = await exports.createOrderInternal(orderPayload);
+    res.status(201).json({ message: "تم إنشاء الطلب بنجاح", orderId });
+  } catch (error) {
+    res.status(500).json({ message: "حدث خطأ أثناء إنشاء الطلب." });
+  }
 });
 
 /**
@@ -301,18 +311,17 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // Check if the requesting user is either the merchant or the supplier for any item in the order
     const [itemsForAuth] = await connection.query(
       `SELECT 
-                p.merchant_id,
-                sp.supplier_id
-             FROM order_items oi
-             JOIN products p ON oi.product_id = p.id
-             LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
-             LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
-             LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
-             LEFT JOIN supplier_products sp ON spv.product_id = sp.id
-             WHERE oi.order_id = ?`,
+            p.merchant_id,
+            sp.supplier_id
+         FROM order_items oi
+         JOIN products p ON oi.product_id = p.id
+         LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
+         LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+         LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+         LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+         WHERE oi.order_id = ?`,
       [orderId]
     );
 
@@ -320,14 +329,12 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
       return res.status(404).json({ message: "الطلب غير موجود." });
     }
 
-    // Check for authorization: is the user a merchant or supplier for ANY item?
     const isAuthorized = itemsForAuth.some(
       (item) =>
         item.merchant_id === requestingUserId ||
         item.supplier_id === requestingUserId
     );
 
-    // **IMPORTANT LOGIC**: Prevent merchant from updating a supplier's order
     const isDropshipOrder = itemsForAuth.some((item) => !!item.supplier_id);
     const isUserSupplier = itemsForAuth.some(
       (item) => item.supplier_id === requestingUserId
@@ -342,12 +349,10 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
     if (isDropshipOrder && !isUserSupplier) {
       await connection.rollback();
-      return res
-        .status(403)
-        .json({
-          message:
-            "لا يمكن للتاجر تحديث حالة طلب دروبشيبينغ. يجب على المورد القيام بذلك.",
-        });
+      return res.status(403).json({
+        message:
+          "لا يمكن للتاجر تحديث حالة طلب دروبشيبينغ. يجب على المورد القيام بذلك.",
+      });
     }
 
     await connection.query("UPDATE orders SET status = ? WHERE id = ?", [

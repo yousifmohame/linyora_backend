@@ -75,7 +75,7 @@ const sendContactMessage = asyncHandler(async (req, res) => {
 
   try {
     await sendEmail({
-      to: "me8999109@gmail.com", // بريد المسؤول لاستقبال الرسائل
+      to: "mojagd112@gmail.com", // بريد المسؤول لاستقبال الرسائل
       subject: contactSubject,
       html: contactHtml,
     });
