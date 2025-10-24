@@ -36,12 +36,24 @@ exports.updateBanner = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { title, subtitle, link_url, button_text, badge_text, is_active } = req.body;
 
-    // ✅ Get the new image URL if one was uploaded
-    let image_url = req.body.image_url; // Keep the old one by default
+    let image_url;
+
     if (req.file) {
-        image_url = req.file.path; // Or use the new one
+        // --- الحالة 1: تم رفع صورة جديدة ---
+        image_url = req.file.path;
+    } else {
+        // --- الحالة 2: لم يتم رفع صورة جديدة ---
+        // [FIX] يجب علينا جلب رابط الصورة القديم من قاعدة البيانات
+        // لأن req.body.image_url غير مضمون (وهو سبب الخطأ)
+        const [[banner]] = await pool.query("SELECT image_url FROM main_banners WHERE id = ?", [id]);
+        
+        if (!banner) {
+            return res.status(404).json({ message: "Banner not found" });
+        }
+        image_url = banner.image_url; // استخدام الرابط القديم
     }
 
+    // الآن، "image_url" مضمون أن له قيمة (جديدة أو قديمة)
     await pool.query(
         "UPDATE main_banners SET title = ?, subtitle = ?, image_url = ?, link_url = ?, button_text = ?, badge_text = ?, is_active = ? WHERE id = ?",
         [title, subtitle, image_url, link_url, button_text, badge_text, is_active === 'true', id]
