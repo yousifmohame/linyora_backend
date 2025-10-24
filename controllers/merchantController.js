@@ -502,24 +502,6 @@ exports.updateProduct = asyncHandler(async (req, res) => {
   }
 });
 
-// // [DELETE] حذف منتج
-// exports.deleteProduct = async (req, res) => {
-//     const { id } = req.params;
-//     try {
-//         const [result] = await pool.query(
-//             'DELETE FROM products WHERE id = ? AND merchant_id = ?',
-//             [id, req.user.id]
-//         );
-
-//         if (result.affectedRows === 0) {
-//             return res.status(404).json({ message: 'المنتج غير موجود أو لا تملك صلاحية حذفه' });
-//         }
-
-//         res.status(200).json({ message: 'تم حذف المنتج بنجاح!' });
-//     } catch (error) {
-//         res.status(500).json({ message: 'خطأ في حذف المنتج' });
-//     }
-// };
 
 // [GET] جلب جميع الطلبات التي تحتوي على منتجات التاجر
 exports.getOrders = async (req, res) => {

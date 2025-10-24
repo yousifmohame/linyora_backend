@@ -248,15 +248,26 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
 
       if (sessionType === "subscription") {
         const { userId, planId } = session.metadata;
-        const startDate = new Date();
-        const endDate = new Date();
-        endDate.setMonth(endDate.getMonth() + 1);
+
+        // ⚠️ يفضل دائماً أخذ تاريخ البداية والنهاية من Stripe لضمان عدم اختلاف الحساب
+        const subscription = await stripe.subscriptions.retrieve(session.subscription);
+
+        const startDate = new Date(subscription.current_period_start * 1000);
+        const endDate = new Date(subscription.current_period_end * 1000);
 
         await connection.query(
-          `INSERT INTO user_subscriptions (user_id, status, start_date, end_date, stripe_subscription_id, plan_id) VALUES (?, 'active', ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE status = 'active', start_date = VALUES(start_date), end_date = VALUES(end_date), stripe_subscription_id = VALUES(stripe_subscription_id), plan_id = VALUES(plan_id)`,
+          `INSERT INTO user_subscriptions 
+            (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
+          VALUES (?, 'active', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+              status = 'active',
+              start_date = VALUES(start_date),
+              end_date = VALUES(end_date),
+              stripe_subscription_id = VALUES(stripe_subscription_id),
+              plan_id = VALUES(plan_id)`,
           [userId, startDate, endDate, session.subscription, planId]
         );
+
         console.log(`✅ Subscription activated for user ID: ${userId}`);
       } else if (sessionType === "product_purchase") {
         const orderPayload = {
