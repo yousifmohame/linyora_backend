@@ -204,8 +204,8 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
         package_tier_id, // ✨ Pass the correct ID
         product_id,
       },
-      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success`,
-      cancel_url: `${process.env.FRONTEND_URL}/dashboard/payment/cancel`,
+      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success?type=agreement&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/models/${model_id}`,
     });
 
     res.json({ url: session.url });
