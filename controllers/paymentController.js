@@ -204,8 +204,8 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
         package_tier_id, // ✨ Pass the correct ID
         product_id,
       },
-      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success?type=agreement&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/models/${model_id}`,
+      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/agreesuccess`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard/payment/cancel`,
     });
 
     res.json({ url: session.url });
@@ -437,64 +437,6 @@ const createAgreementPaymentIntent = async (req, res) => {
   }
 };
 
-/**
- * @desc    التحقق من جلسة الدفع بعد عودة المستخدم
- * @route   POST /api/payments/verify-session
- * @access  Private (User)
- */
-const verifySession = asyncHandler(async (req, res) => {
-  const { session_id, type } = req.body;
-  const user_id = req.user.id; // المستخدم الذي قام بالدفع
-
-  try {
-    const stripe = getStripe();
-    const session = await stripe.checkout.sessions.retrieve(session_id);
-
-    // 1. التحقق من أن الدفع تم بنجاح
-    if (session.payment_status !== "paid") {
-      return res.status(400).json({ message: "لم يتم إكمال الدفع." });
-    }
-    
-    // 2. التحقق من أن النوع متطابق
-    if (session.metadata.sessionType !== req.body.type) {
-         return res.status(400).json({ message: "نوع الجلسة غير متطابق." });
-    }
-
-    // 3. التحقق من أن هذه الجلسة تخص المستخدم الحالي
-    // (هذه خطوة أمان إضافية اختيارية ولكنها مهمة)
-    if (type === "agreement" && session.metadata.merchant_id != user_id) {
-         return res.status(403).json({ message: "هذه الجلسة لا تخصك." });
-    }
-    if (type === "subscription" && session.metadata.userId != user_id) {
-         return res.status(403).json({ message: "هذه الجلسة لا تخصك." });
-    }
-
-    // 4. (الأهم) التحقق إذا كان الـ Webhook قد قام بمعالجة الطلب
-    // هذا يمنع إنشاء اتفاقيات مكررة إذا قام المستخدم بتحديث الصفحة
-    
-    if (type === "agreement") {
-        const [[agreement]] = await pool.query(
-            "SELECT id FROM agreements WHERE stripe_payment_intent_id = ?",
-            [session.payment_intent]
-        );
-        
-        if (!agreement) {
-            // الـ Webhook تأخر. قم بمعالجة سريعة هنا (أو يمكنك إظهار "جاري المعالجة")
-             console.warn(`Webhook for ${session.id} might be delayed. Manually verifying.`);
-             // يمكنك إضافة نفس منطق الإنشاء الموجود في الـ Webhook هنا كنسخة احتياطية
-             // ولكن الأفضل هو الاعتماد على الـ Webhook
-        }
-    }
-    
-    // إذا وصل الكود إلى هنا، فكل شيء سليم
-    res.status(200).json({ message: "تم التحقق من الدفع بنجاح." });
-
-  } catch (error) {
-    console.error("Error verifying session:", error);
-    res.status(500).json({ message: "خطأ أثناء التحقق من الجلسة." });
-  }
-});
-
 module.exports = {
   createSubscriptionSession,
   createCheckoutSessionForProducts,
@@ -502,5 +444,4 @@ module.exports = {
   cancelSubscription,
   createAgreementPaymentIntent,
   createAgreementCheckoutSession,
-  verifySession,
 };
