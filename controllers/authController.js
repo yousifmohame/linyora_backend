@@ -13,11 +13,13 @@ const generateVerificationCode = () =>
 const getCodeExpiration = () => new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
 
 /**
- * @desc    Register a new user with intelligent verification handling
+ * @desc    Register a new user
  * @route   POST /api/auth/register
  * @access  Public
  */
 exports.register = asyncHandler(async (req, res) => {
+  // ... (كود التسجيل الخاص بك يبقى كما هو)
+  // ...
   const { name, email, password, phoneNumber, roleId } = req.body;
 
   if (!name || !email || !password || !roleId) {
@@ -101,7 +103,7 @@ exports.register = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Log in a user
+ * @desc    Step 1: Validate credentials and send login code
  * @route   POST /api/auth/login
  * @access  Public
  */
@@ -121,7 +123,7 @@ exports.login = asyncHandler(async (req, res) => {
     throw new Error("Invalid credentials.");
   }
 
-  // ✅ FIX: Security check to prevent unverified users from logging in.
+  // 1. التأكد أن المستخدم قام بتفعيل حسابه أصلاً
   if (!user.is_email_verified) {
     res.status(403); // 403 Forbidden
     throw new Error(
@@ -129,13 +131,74 @@ exports.login = asyncHandler(async (req, res) => {
     );
   }
 
+  // 2. التحقق من كلمة المرور
   const isMatch = await bcrypt.compare(password, user.password);
   if (!isMatch) {
     res.status(401);
     throw new Error("Invalid credentials.");
   }
 
-  // Generate JWT token
+  // 3. كلمة المرور صحيحة، الآن نرسل كود التحقق
+  const loginCode = generateVerificationCode();
+  const expiration = getCodeExpiration();
+
+  // 4. حفظ الكود المؤقت في قاعدة البيانات (نستخدم نفس أعمدة تفعيل الإيميل)
+  await pool.query(
+    "UPDATE users SET email_verification_code = ?, email_verification_expires = ? WHERE id = ?",
+    [loginCode, expiration, user.id]
+  );
+
+  // 5. إرسال الكود عبر الإيميل
+  await sendEmail({
+    to: email,
+    subject: "Your Linora Login Verification Code",
+    html: `<h1>Login Verification</h1><p>Your login code is: <strong>${loginCode}</strong></p><p>This code will expire in 10 minutes.</p>`,
+  });
+
+  // 6. إرسال رسالة نجاح للواجهة الأمامية للانتقال للخطوة الثانية
+  res.status(200).json({
+    success: true,
+    message: "Verification code sent to your email. Please check your inbox.",
+  });
+});
+
+/**
+ * @desc    Step 2: Verify login code and issue JWT
+ * @route   POST /api/auth/verify-login
+ * @access  Public
+ */
+exports.verifyLogin = asyncHandler(async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) {
+    res.status(400);
+    throw new Error("Email and code are required.");
+  }
+
+  const [[user]] = await pool.query("SELECT * FROM users WHERE email = ?", [
+    email,
+  ]);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  // التحقق من الكود ومن تاريخ انتهاء صلاحيته
+  if (
+    user.email_verification_code !== code ||
+    new Date() > new Date(user.email_verification_expires)
+  ) {
+    res.status(400);
+    throw new Error("Invalid or expired verification code.");
+  }
+
+  // الكود صحيح، قم بتنظيف قاعدة البيانات
+  await pool.query(
+    "UPDATE users SET email_verification_code = NULL, email_verification_expires = NULL WHERE id = ?",
+    [user.id]
+  );
+
+  // الآن فقط نقوم بإنشاء التوكن وإرساله
   const token = jwt.sign(
     { id: user.id, role: user.role_id },
     process.env.JWT_SECRET,
@@ -157,12 +220,12 @@ exports.login = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Verify user's email with a code
+ * @desc    Verify user's email with a code (For Registration)
  * @route   POST /api/auth/verify-email
  * @access  Public
  */
 exports.verifyEmail = asyncHandler(async (req, res) => {
-  // ✅ FIX: Now identifies user by email, which is more secure and reliable.
+  // ... (هذه الدالة تبقى كما هي، هي خاصة بالتسجيل)
   const { email, code } = req.body;
 
   if (!email || !code) {
@@ -170,6 +233,7 @@ exports.verifyEmail = asyncHandler(async (req, res) => {
     throw new Error("Email and verification code are required.");
   }
 
+  // هذا السطر يضمن أنها تعمل فقط للحسابات غير المفعلة (is_email_verified = 0)
   const [[user]] = await pool.query(
     "SELECT id, email_verification_code, email_verification_expires FROM users WHERE email = ? AND is_email_verified = 0",
     [email]
@@ -198,12 +262,9 @@ exports.verifyEmail = asyncHandler(async (req, res) => {
     .json({ message: "Email verified successfully. You can now log in." });
 });
 
-/**
- * @desc    Resend verification email
- * @route   POST /api/auth/resend-verification
- * @access  Public
- */
+// ... (باقي الدوال: resendVerification, forgotPassword, resetPassword تبقى كما هي)
 exports.resendVerification = asyncHandler(async (req, res) => {
+  // ... (الكود الحالي)
   const { email } = req.body;
 
   if (!email) {
@@ -241,6 +302,7 @@ exports.resendVerification = asyncHandler(async (req, res) => {
 });
 
 exports.forgotPassword = async (req, res) => {
+  // ... (الكود الحالي)
   const { email } = req.body;
   if (!email) {
     return res.status(400).json({ message: "الرجاء إدخال البريد الإلكتروني." });
@@ -314,8 +376,8 @@ exports.forgotPassword = async (req, res) => {
   }
 };
 
-// --- ✨ دالة إعادة تعيين كلمة المرور الجديدة ---
 exports.resetPassword = async (req, res) => {
+  // ... (الكود الحالي)
   const { token } = req.params;
   const { password } = req.body;
 
