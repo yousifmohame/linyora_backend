@@ -6,7 +6,6 @@ const {
   requestPayout,
   getWalletTransactions,
   getModelWallet,
-  getModelPayoutMethods,
   getModelTransactions,
   requestModelPayout,
 } = require("../controllers/walletController");
@@ -30,12 +29,7 @@ router.get(
   restrictTo(3, 4),
   getModelTransactions
 ); // ✨ المسار الجديد
-router.get(
-  "/model/payout-methods",
-  protect,
-  restrictTo(3, 4),
-  getModelPayoutMethods
-); // ✨ المسار الجديد
+
 router.post(
   "/model/request-payout",
   protect,

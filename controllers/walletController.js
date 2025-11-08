@@ -140,27 +140,50 @@ exports.requestPayout = async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const [walletResult] = await connection.query(
-      "SELECT balance FROM merchant_wallets WHERE merchant_id = ? FOR UPDATE",
+
+    // --- ⭐️ بداية الإضافة: التحقق من الطلبات المعلقة ---
+    const [pendingRequests] = await connection.query(
+      "SELECT COUNT(*) as count FROM payout_requests WHERE merchant_id = ? AND status = 'pending'",
       [merchantId]
     );
-    const currentBalance =
-      walletResult.length > 0 ? parseFloat(walletResult[0].balance) : 0;
 
-    if (walletResult.length === 0 || currentBalance < numericAmount) {
+    if (pendingRequests[0].count > 0) {
+      await connection.rollback();
+      connection.release();
+      return res
+        .status(400)
+        .json({ message: "لديك طلب سحب قيد المراجعة بالفعل." });
+    }
+    // --- ⭐️ نهاية الإضافة ---
+
+    // (الآن نكمل بالمنطق الذي اقترحناه سابقاً - من wallet_transactions)
+    const [[wallet]] = await connection.query(
+      `SELECT COALESCE(SUM(amount), 0) as balance 
+       FROM wallet_transactions 
+       WHERE user_id = ? AND status = 'cleared' FOR UPDATE`,
+      [merchantId]
+    );
+    const currentBalance = parseFloat(wallet.balance);
+
+    if (currentBalance < numericAmount) {
       await connection.rollback();
       return res
         .status(400)
         .json({ message: "رصيدك غير كاف لإتمام عملية السحب." });
     }
 
-    await connection.query(
-      "UPDATE merchant_wallets SET balance = balance - ? WHERE merchant_id = ?",
-      [numericAmount, merchantId]
+    // 1. إنشاء معاملة سحب جديدة (سالبة)
+    const [txInsert] = await connection.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, status, description) 
+       VALUES (?, ?, 'payout', 'cleared', ?)`,
+      [merchantId, -numericAmount, "طلب سحب قيد المراجعة"]
     );
+    const txId = txInsert.insertId;
+
+    // 2. تسجيل طلب السحب للمراجعة الإدارية
     await connection.query(
-      "INSERT INTO payout_requests (merchant_id, amount) VALUES (?, ?)",
-      [merchantId, numericAmount]
+      "INSERT INTO payout_requests (merchant_id, amount, status, wallet_transaction_id) VALUES (?, ?, 'pending', ?)",
+      [merchantId, numericAmount, txId] // 'pending' هو الحالة الافتراضية
     );
 
     await connection.commit();
@@ -187,7 +210,7 @@ exports.getModelWallet = async (req, res) => {
     // استعلام واحد لجلب كل الأرصدة المطلوبة
     const query = `
       SELECT
-        (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'earning' AND status = 'cleared') as balance,
+        (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared') as balance,
         (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'earning' AND status = 'pending_clearance') as pending_clearance
       FROM DUAL;
     `;
@@ -248,41 +271,13 @@ exports.getModelTransactions = async (req, res) => {
 };
 
 /**
- * @desc    Get available payout methods for models
- * @route   GET /api/wallet/model/payout-methods
- * @access  Private (Model/Influencer)
- */
-exports.getModelPayoutMethods = async (req, res) => {
-  // في نظام حقيقي، هذه البيانات ستكون من قاعدة البيانات
-  // الآن، سنقوم بإرجاع بيانات وهمية لتشغيل الواجهة الأمامية
-  const methods = [
-    {
-      id: "bank-transfer-sa",
-      type: "bank",
-      name: "تحويل بنكي (السعودية)",
-      details: "ينتهي بـ **** 1234",
-      isDefault: true,
-    },
-    {
-      id: "stc-pay",
-      type: "wallet",
-      name: "STC Pay",
-      details: "055 **** 5678",
-      isDefault: false,
-    },
-  ];
-  res.status(200).json(methods);
-};
-
-/**
  * @desc    Create a new payout request for a model/influencer
  * @route   POST /api/wallet/model/request-payout
  * @access  Private (Model/Influencer)
  */
 exports.requestModelPayout = async (req, res) => {
   const userId = req.user.id;
-  // الواجهة الأمامية ترسل method_id، يجب استقباله
-  const { amount, method_id } = req.body;
+  const { amount } = req.body;
   const numericAmount = Number(amount);
 
   if (!numericAmount || numericAmount <= 0) {
@@ -293,19 +288,31 @@ exports.requestModelPayout = async (req, res) => {
       .status(400)
       .json({ message: "الحد الأدنى لطلب السحب هو 50 ريال." });
   }
-  if (!method_id) {
-    return res.status(400).json({ message: "الرجاء تحديد وسيلة الدفع." });
-  }
 
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
 
+    // --- ⭐️ بداية الإضافة: التحقق من الطلبات المعلقة ---
+    const [pendingRequests] = await connection.query(
+      "SELECT COUNT(*) as count FROM model_payout_requests WHERE user_id = ? AND status = 'pending'",
+      [userId]
+    );
+
+    if (pendingRequests[0].count > 0) {
+      await connection.rollback();
+      connection.release();
+      return res
+        .status(400)
+        .json({ message: "لديك طلب سحب قيد المراجعة بالفعل." });
+    }
+    // --- ⭐️ نهاية الإضافة ---
+
     // حساب الرصيد المتاح مباشرة من المعاملات المكتملة
     const [[wallet]] = await connection.query(
       `SELECT COALESCE(SUM(amount), 0) as balance 
        FROM wallet_transactions 
-       WHERE user_id = ? AND type = 'earning' AND status = 'cleared' FOR UPDATE`,
+       WHERE user_id = ? AND status = 'cleared' FOR UPDATE`,
       [userId]
     );
     const availableBalance = parseFloat(wallet.balance);
@@ -318,16 +325,17 @@ exports.requestModelPayout = async (req, res) => {
     }
 
     // 1. إنشاء معاملة سحب جديدة في wallet_transactions بالسالب
-    await connection.query(
+    const [txInsert] = await connection.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, status, description) 
        VALUES (?, ?, 'payout', 'cleared', ?)`,
-      [userId, -numericAmount, `طلب سحب إلى ${method_id}`]
+      [userId, -numericAmount, "طلب سحب قيد المراجعة"]
     );
+    const txId = txInsert.insertId;
 
     // 2. تسجيل طلب السحب للمراجعة الإدارية
     await connection.query(
-      "INSERT INTO model_payout_requests (user_id, amount, payout_method_id) VALUES (?, ?, ?)",
-      [userId, numericAmount, method_id]
+      "INSERT INTO model_payout_requests (user_id, amount, status, wallet_transaction_id) VALUES (?, ?, 'pending', ?)",
+      [userId, numericAmount, txId]
     );
 
     await connection.commit();

@@ -1114,64 +1114,112 @@ exports.getAllModelPayouts = async (req, res) => {
  * @route   PUT /api/admin/model-payouts/:id
  * @access  Private (Admin)
  */
-exports.updateModelPayoutStatus = async (req, res) => {
+exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { status, notes } = req.body; // 'approved' or 'rejected'
 
   if (!["approved", "rejected"].includes(status)) {
-    return res.status(400).json({ message: "حالة غير صالحة." });
+    return res.status(400).json({ message: "Status is required." });
   }
 
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
 
-    // 1. جلب الطلب للتأكد من وجوده وأنه ما زال معلقاً
-    const [[request]] = await connection.query(
-      "SELECT * FROM model_payout_requests WHERE id = ? AND status = 'pending' FOR UPDATE",
+    const [payouts] = await connection.query(
+      "SELECT * FROM model_payout_requests WHERE id = ? FOR UPDATE",
       [id]
     );
+    const payout = payouts[0];
 
-    if (!request) {
+    if (!payout) {
       await connection.rollback();
-      return res
-        .status(404)
-        .json({ message: "الطلب غير موجود أو تمت معالجته مسبقاً." });
+      return res.status(404).json({ message: "Payout request not found." });
+    }
+    
+    if (payout.status !== 'pending') {
+        await connection.rollback();
+        return res.status(400).json({ message: "Request already processed." });
     }
 
-    // 2. في حالة الرفض، يتم إرجاع المبلغ إلى رصيد المودل
-    if (status === "rejected") {
-      await connection.query(
-        "UPDATE model_wallets SET balance = balance + ? WHERE user_id = ?",
-        [request.amount, request.user_id]
-      );
-    }
-
-    // 3. تحديث حالة الطلب وإضافة الملاحظات
+    // 1. تحديث الطلب
     await connection.query(
       "UPDATE model_payout_requests SET status = ?, notes = ? WHERE id = ?",
       [status, notes, id]
     );
 
+    // 2. إذا تم الرفض، أعد المال إلى wallet_transactions
+    if (status === 'rejected') {
+      const [txs] = await connection.query(
+        "SELECT * FROM wallet_transactions WHERE id = ?",
+        [payout.wallet_transaction_id] // هذا هو العمود الذي أضفناه
+      );
+      const originalTx = txs[0];
+
+      if (originalTx) {
+        await connection.query(
+          `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id) 
+           VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
+          [
+            payout.user_id,
+            Math.abs(originalTx.amount), // إرجاع المبلغ الموجب
+            `إلغاء طلب السحب المرفوض #${id}`,
+            payout.id,
+          ]
+        );
+      }
+    }
+
+    // 3. إذا تمت الموافقة، لا نفعل شيئاً
+
     await connection.commit();
-
-    // (اختياري: يمكنك هنا إرسال إشعار أو بريد إلكتروني للمودل لإعلامها بحالة طلبها)
-
-    res
-      .status(200)
-      .json({
-        message: `تم ${
-          status === "approved" ? "قبول" : "رفض"
-        } طلب السحب بنجاح.`,
-      });
+    res.json({ message: `Payout ${status}.` });
   } catch (error) {
     await connection.rollback();
-    console.error("Error updating model payout status:", error);
+    console.error("Error updating model payout:", error);
     res.status(500).json({ message: "Server error" });
   } finally {
     connection.release();
   }
-};
+});
+
+
+/**
+ * @desc    Admin: Get details for a single model payout request
+ * @route   GET /api/admin/model-payouts/:id
+ * @access  Private (Admin)
+ */
+exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        // قمنا بعمل JOIN مع users لجلب اسم الموديل
+        // و LEFT JOIN مع merchant_bank_details لجلب بيانات البنك
+        // (نفترض أن الموديل تستخدم نفس جدول التجار للبيانات البنكية)
+        const [details] = await pool.query(
+            `SELECT 
+                mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
+                u.name as userName, u.email as userEmail, u.phone_number,
+                mbd.account_number, mbd.iban, mbd.iban_certificate_url, mbd.bank_name 
+             FROM model_payout_requests mpr
+             JOIN users u ON mpr.user_id = u.id
+             LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
+             WHERE mpr.id = ?`,
+            [id]
+        );
+
+        if (details.length === 0) {
+            return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
+        }
+
+        res.json(details[0]);
+    } catch (error) {
+        console.error("Error fetching model payout request details:", error);
+        res.status(500).json({ message: "Server error" });
+    }
+});
+
+
 
 // [GET] جلب جميع باقات الترويج
 exports.getAllPromotionTiers = asyncHandler(async (req, res) => {

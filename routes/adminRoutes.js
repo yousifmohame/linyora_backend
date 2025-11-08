@@ -40,6 +40,7 @@ const {
   updateModelPayoutStatus,
   adminGetAllConversations,
   adminGetMessagesForConversation,
+  getModelPayoutDetails,
 } = require("../controllers/adminController");
 const {
   updateCategory,
@@ -116,7 +117,10 @@ router.route("/subscription-plans/:id").put(protect, updateSubscriptionPlan);
 
 // --- ✨ Payout Management Routes for Models (New) ---
 router.route("/model-payouts").get(getAllModelPayouts);
-router.route("/model-payouts/:id").put(updateModelPayoutStatus);
+router
+  .route("/model-payouts/:id")
+  .get(protect, protect, getModelPayoutDetails) // <-- ✨ أضف هذا السطر
+  .put(protect, protect, updateModelPayoutStatus);
 
 router.get("/conversations", protect, adminGetAllConversations);
 router.get(
