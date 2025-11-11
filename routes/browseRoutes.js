@@ -11,6 +11,8 @@ const {
   getNewArrivals,
   getBestSellers,
   getTopRated,
+  getTopModels,
+  getTopMerchants,
 } = require("../controllers/browseController");
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 const { getActiveBanners } = require("../controllers/mainBannerController"); // استيراد الدالة الجديدة
@@ -27,6 +29,8 @@ router.route("/top-rated").get(getTopRated);
 router.get("/trends", getTrendingProducts);
 router.get("/models/:id", getPublicModelProfile);
 router.get("/categories/:slug", getProductsByCategorySlug);
+router.get("/top-models", getTopModels);
+router.get("/top-merchants", getTopMerchants);
 
 router.use(protect, restrictTo(2));
 

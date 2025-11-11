@@ -1324,17 +1324,31 @@ exports.approvePromotionRequest = asyncHandler(async (req, res) => {
 exports.getAllProducts = asyncHandler(async (req, res) => {
     // استعلام معقد لجلب كل البيانات المطلوبة بكفاءة
     const query = `
-        SELECT
-            p.id,
-            p.name,
-            p.brand,
-            p.status,
-            p.created_at AS createdAt,
-            u.name AS merchantName,
-            (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id) AS variantCount,
-            (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) AS price,
-            (SELECT SUM(stock_quantity) FROM product_variants WHERE product_id = p.id) AS inventory,
-            (SELECT GROUP_CONCAT(c.name SEPARATOR ', ') FROM product_categories pc JOIN categories c ON pc.category_id = c.id WHERE pc.product_id = p.id) as category
+        SELECT 
+        p.id, p.name, p.brand, p.status, p.created_at AS createdAt,
+        u.name AS merchantName,
+        (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id) AS variantCount,
+        (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) AS price,
+        (SELECT SUM(stock_quantity) FROM product_variants WHERE product_id = p.id) AS inventory,
+        (SELECT GROUP_CONCAT(c.name SEPARATOR ', ') FROM product_categories pc JOIN categories c ON pc.category_id = c.id WHERE pc.product_id = p.id) as category,
+        
+        -- 👇 هذا هو منطق جلب الصورة الذي اكتشفناه 👇
+        (
+            SELECT svi.image_url
+            FROM supplier_variant_images svi
+            JOIN supplier_product_variants spv ON svi.variant_id = spv.id
+            JOIN dropship_links dl ON spv.id = dl.supplier_variant_id
+            WHERE dl.merchant_variant_id = (
+                SELECT pv_inner.id
+                FROM product_variants pv_inner
+                WHERE pv_inner.product_id = p.id
+                ORDER BY pv_inner.price ASC
+                LIMIT 1
+            )
+            ORDER BY svi.sort_order ASC
+            LIMIT 1
+        ) as image_from_supplier
+
         FROM products p
         JOIN users u ON p.merchant_id = u.id
         ORDER BY p.created_at DESC;

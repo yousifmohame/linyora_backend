@@ -23,6 +23,7 @@ const {
     deleteMerchantShippingCompany,
     getPromotionTiers, // تم التغيير
     promoteProduct,      // تم التغيير
+    getMerchantPublicProfile
 } = require("../controllers/merchantController");
 
 const {
@@ -32,6 +33,8 @@ const {
 } = require("../middleware/authMiddleware");
 const upload = require("../middleware/uploadMiddleware");
 
+
+router.get('/public-profile/:id', getMerchantPublicProfile);
 // --- 2. حماية جميع المسارات والتأكد من أن المستخدم هو "تاجر" ---
 router.use(protect, restrictTo(2));
 

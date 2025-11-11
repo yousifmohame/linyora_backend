@@ -433,3 +433,31 @@ exports.getTopRated = asyncHandler(async (req, res) => {
   const fullProducts = await fetchFullProductData(productRows);
   res.status(200).json(fullProducts);
 });
+
+exports.getTopModels = asyncHandler(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
+
+  // 💡 ملاحظة: تأكد من أن role_id = 3 هو للمودلز
+  // قد يختلف الرقم حسب قاعدة البيانات لديك
+  const [models] = await pool.query(
+    `SELECT id, name, profile_picture_url FROM users WHERE role_id = 3 AND is_email_verified = 1 LIMIT ?`,
+    [limit]
+  );
+  
+  res.json(models);
+});
+
+// @desc    Get top merchants
+// @route   GET /api/browse/top-merchants
+// @access  Public
+exports.getTopMerchants = asyncHandler(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
+
+  // 💡 ملاحظة: تأكد من أن role_id = 2 هو للتاجرات
+  const [merchants] = await pool.query(
+    `SELECT id, name, profile_picture_url FROM users WHERE role_id = 2 AND is_email_verified = 1 LIMIT ?`,
+    [limit]
+  );
+  
+  res.json(merchants);
+});

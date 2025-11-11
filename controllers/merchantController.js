@@ -1013,3 +1013,72 @@ exports.deleteProduct = asyncHandler(async (req, res) => {
         connection.release();
     }
 });
+
+// @desc    Get merchant public profile by ID
+// @route   GET /api/merchants/public-profile/:id
+// @access  Public
+exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  // [1] جلب بيانات التاجر
+  const [users] = await pool.query(
+    'SELECT id, name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1',
+    [id]
+  );
+
+  if (users.length === 0) {
+    res.status(404);
+    throw new Error('Merchant not found');
+  }
+
+  const merchant = users[0];
+
+  // [2] جلب المنتجات مع حقل "images" من أول variant
+  const [rawProducts] = await pool.query(
+    `SELECT 
+        p.id, p.name, p.status,
+        u.name as merchantName,
+        (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
+        (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
+        (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as price,
+        (SELECT pv.images FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1) as variant_images_json
+     FROM products p
+     JOIN users u ON p.merchant_id = u.id
+     WHERE p.merchant_id = ? AND p.status = "active" 
+     ORDER BY p.created_at DESC`, 
+    [id]
+  );
+
+  // [3] تنسيق البيانات: تحليل مصفوفة الصور
+  const products = rawProducts.map(product => {
+    
+    let firstImage = null;
+    try {
+      // <-- [الخطوة 1] تحليل نص المصفوفة القادم من قاعدة البيانات
+      const imagesArray = JSON.parse(product.variant_images_json || '[]');
+      
+      // <-- [الخطوة 2] أخذ أول صورة (index 0)
+      if (imagesArray.length > 0) {
+        firstImage = imagesArray[0]; 
+      }
+    } catch (e) {
+      console.error("Failed to parse product_variants images:", product.variant_images_json);
+    }
+
+    return {
+      ...product,
+      price: product.price,
+      merchant_name: product.merchantName,
+      
+      // <-- [الخطوة 3] بناء الرابط من الصورة ذات index 0
+      image_url: firstImage 
+        ? `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/${firstImage}` 
+        : null 
+    };
+  });
+
+  res.json({
+    ...merchant,
+    products: products || [] 
+  });
+});
