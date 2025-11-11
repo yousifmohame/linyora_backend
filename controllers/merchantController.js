@@ -1033,7 +1033,7 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
 
   const merchant = users[0];
 
-  // [2] جلب المنتجات مع حقل "images" من أول variant
+  // [2] جلب المنتجات (نفس الاستعلام الذي جلب البيانات الخام بنجاح)
   const [rawProducts] = await pool.query(
     `SELECT 
         p.id, p.name, p.status,
@@ -1048,37 +1048,43 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
      ORDER BY p.created_at DESC`, 
     [id]
   );
-
-  // [3] تنسيق البيانات: تحليل مصفوفة الصور
+  
+  // --- ✨ [3] تنسيق البيانات لتطابق ProductCard.tsx ---
   const products = rawProducts.map(product => {
     
-    let firstImage = null;
+    let variantImages = [];
     try {
-      // <-- [الخطوة 1] تحليل نص المصفوفة القادم من قاعدة البيانات
-      const imagesArray = JSON.parse(product.variant_images_json || '[]');
-      
-      // <-- [الخطوة 2] أخذ أول صورة (index 0)
-      if (imagesArray.length > 0) {
-        firstImage = imagesArray[0]; 
-      }
+      // الـ log أثبت أن هذا السطر يرجع ["https://..."]
+      variantImages = JSON.parse(product.variant_images_json || '[]');
     } catch (e) {
-      console.error("Failed to parse product_variants images:", product.variant_images_json);
+      console.error("Failed to parse images:", product.variant_images_json);
     }
 
+    // [الحل] نقوم بإنشاء "خيار" (variant) واحد فقط
+    // ونضع فيه البيانات التي يتوقعها ProductCard
+    const simulatedVariant = {
+      price: product.price || 0,
+      compare_at_price: product.compare_at_price || null, // (لم نجلب هذا، لكن null آمن)
+      images: variantImages, // <-- مصفوفة الصور التي يبحث عنها ProductCard
+    };
+
     return {
-      ...product,
-      price: product.price,
-      merchant_name: product.merchantName,
+      // البيانات الأساسية للمنتج
+      id: product.id,
+      name: product.name,
+      status: product.status,
+      rating: product.rating,
+      reviewCount: product.reviewCount,
+      merchantName: product.merchantName, // <-- اسم التاجر الذي يبحث عنه ProductCard
       
-      // <-- [الخطوة 3] بناء الرابط من الصورة ذات index 0
-      image_url: firstImage 
-        ? `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/${firstImage}` 
-        : null 
+      // ✨ الأهم: نضع الخيار المزيف داخل مصفوفة variants
+      variants: [simulatedVariant]
     };
   });
+  // ----------------------------------------
 
   res.json({
     ...merchant,
-    products: products || [] 
+    products: products || [] // <-- إرسال المنتجات بالتنسيق الصحيح
   });
 });
