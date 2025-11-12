@@ -47,9 +47,12 @@ router
 router.put("/addresses/:id/default", protect, setDefaultAddress);
 
 router.post(
-  "/submit-verification",
-  protect,
-  upload.single("identity_image"),
+  "/submit-verification", 
+  protect, 
+  upload.fields([
+    { name: 'identity_image', maxCount: 1 },
+    { name: 'iban_certificate', maxCount: 1 }
+  ]), 
   submitVerification
 );
 

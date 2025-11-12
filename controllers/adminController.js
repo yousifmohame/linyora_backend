@@ -1091,21 +1091,30 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
  */
 exports.getAllModelPayouts = async (req, res) => {
   try {
+    // ✨ [الحل] قمنا بتطبيق نفس منطق الـ JOIN من دالة getModelPayoutDetails
     const [requests] = await pool.query(`
-            SELECT 
-                mpr.id, mpr.amount, mpr.status, mpr.created_at,
-                u.id as user_id, u.name as userName, u.email as userEmail
-            FROM model_payout_requests mpr
-            JOIN users u ON mpr.user_id = u.id
-            WHERE mpr.status = 'pending'
-            ORDER BY mpr.created_at ASC
-        `);
-    res.status(200).json(requests);
+        SELECT 
+          mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
+          u.id as user_id, 
+          u.name as userName,      
+          u.email as userEmail,
+          
+          -- ✨ إضافة بيانات البنك من الجدول الموحد
+          mbd.account_number, 
+          mbd.iban, 
+          mbd.iban_certificate_url
+
+      FROM model_payout_requests mpr
+      JOIN users u ON mpr.user_id = u.id
+      LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
+      -- WHERE mpr.status = 'pending'
+      ORDER BY mpr.created_at DESC
+    `);
+    
+    res.json(requests);
   } catch (error) {
-    console.error("Error fetching model payout requests:", error);
-    res
-      .status(500)
-      .json({ message: "Server error while fetching payout requests." });
+    console.error("Error fetching all model payout requests:", error);
+    res.status(500).json({ message: "Server error" });
   }
 };
 

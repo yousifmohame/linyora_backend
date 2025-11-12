@@ -265,50 +265,101 @@ exports.acceptAgreement = asyncHandler(async (req, res) => {
     res.json({ message: "Agreement accepted successfully." });
 });
 
-// أضف هذه الدالة في ملف userController.js
 
 /**
- * @desc    Submit user's identity and social media verification
+ * @desc    Submit user's identity, social media, and BANK verification
  * @route   POST /api/users/submit-verification
  * @access  Private (Models, Influencers, etc.)
  */
 exports.submitVerification = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    // ✅ Get new social media and stats fields from the body
-    const { identity_number, social_links, stats } = req.body;
-    const identity_image_url = req.file?.path;
+    
+    // [2] استقبال جميع البيانات (القديمة + بيانات البنك)
+    const { 
+      identity_number, 
+      social_links, 
+      stats,          // <-- إضافة
+      account_number,      // <-- إضافة
+      iban                 // <-- إضافة
+    } = req.body;
+    
+    // [3] استخدام req.files (لأننا نتوقع ملفين الآن)
+    const files = req.files;
 
-    if (!identity_number || !identity_image_url) {
+    // [4] التحقق من البيانات الأساسية (مثل كود التاجر)
+    if (
+      !identity_number ||
+      !files || !files.identity_image ||
+      !iban ||
+      !files.iban_certificate
+    ) {
         res.status(400);
-        throw new Error('رقم الهوية وصورة الهوية مطلوبان.');
+        throw new Error('رقم الهوية، صورة الهوية، الآيبان، وشهادة الآيبان، كلها مطلوبة.');
     }
 
-    // Parse JSON strings if they are sent as strings
-    const parsedSocialLinks = typeof social_links === 'string' ? JSON.parse(social_links) : social_links;
-    const parsedStats = typeof stats === 'string' ? JSON.parse(stats) : stats;
-
+    // [5] التحقق من الطلبات السابقة (من الكود الأصلي)
     const [[existingUser]] = await pool.query("SELECT verification_status FROM users WHERE id = ?", [userId]);
-
     if (existingUser.verification_status === 'pending' || existingUser.verification_status === 'approved') {
         res.status(400);
         throw new Error('لديك طلب تحقق بالفعل أو تم التحقق من حسابك.');
     }
 
-    // ✅ Update the user with identity, social links, and stats
-    await pool.query(
-        `UPDATE users SET 
-            identity_number = ?, 
-            identity_image_url = ?, 
-            social_links = ?, 
-            stats = ?, 
-            verification_status = 'pending' 
-         WHERE id = ?`,
-        [identity_number, identity_image_url, JSON.stringify(parsedSocialLinks || {}), JSON.stringify(parsedStats || {}), userId]
-    );
+    // [6] تحليل بيانات JSON (من الكود الأصلي)
+    const parsedSocialLinks = typeof social_links === 'string' ? JSON.parse(social_links) : social_links;
+    const parsedStats = typeof stats === 'string' ? JSON.parse(stats) : stats;
 
-    res.status(200).json({ message: 'تم إرسال طلب التحقق بنجاح، ستتم مراجعته من قبل الإدارة.' });
+    // [7] بدء المعاملة (Transaction)
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // [8] الخطوة الأولى: تحديث جدول `users` (الكود الأصلي)
+        await connection.query(
+            `UPDATE users SET 
+                identity_number = ?, 
+                identity_image_url = ?, 
+                social_links = ?, 
+                stats = ?, 
+                verification_status = 'pending' 
+             WHERE id = ?`,
+            [
+              identity_number, 
+              files.identity_image[0].path, // المسار من Cloudinary
+              JSON.stringify(parsedSocialLinks || {}), 
+              JSON.stringify(parsedStats || {}), 
+              userId
+            ]
+        );
+
+        // [9] الخطوة الثانية: إضافة/تحديث "الجدول الموحد" `merchant_bank_details`
+        await connection.query(
+          `INSERT INTO merchant_bank_details 
+            (user_id, account_number, iban, iban_certificate_url) 
+           VALUES (?, ?, ?, ?) 
+           ON DUPLICATE KEY UPDATE 
+             account_number = VALUES(account_number), 
+             iban = VALUES(iban), 
+             iban_certificate_url = VALUES(iban_certificate_url)`,
+          [
+            userId,
+            account_number,
+            iban,
+            files.iban_certificate[0].path, // المسار من Cloudinary
+          ]
+        );
+
+        // [10] إنهاء المعاملة
+        await connection.commit();
+        res.status(200).json({ message: 'تم إرسال طلب التحقق بنجاح، ستتم مراجعته من قبل الإدارة.' });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error submitting user verification:", error);
+        res.status(500).json({ message: "فشل في تقديم بيانات التوثيق." });
+    } finally {
+        connection.release();
+    }
 });
-
 // @desc    Update user profile picture
 // @route   POST /api/users/profile/picture
 // @access  Private
