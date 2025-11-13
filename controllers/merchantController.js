@@ -1044,7 +1044,7 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
 
   // [1] جلب بيانات التاجر
   const [users] = await pool.query(
-    "SELECT id, name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1",
+    "SELECT id, name, store_name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1",
     [id]
   );
 
@@ -1059,7 +1059,7 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
   const [rawProducts] = await pool.query(
     `SELECT 
         p.id, p.name, p.status,
-        u.name as merchantName,
+        u.store_name as merchantName,
         (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
         (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
         (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as price,

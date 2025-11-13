@@ -77,7 +77,7 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
     let dataQuery = `
             SELECT 
                 p.id, p.name, p.description, p.brand, p.status,
-                u.name as merchantName,
+                u.store_name as merchantName,
                 (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
                 (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
                 (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as min_price
@@ -152,7 +152,7 @@ exports.getAllProductsCompatible = async (req, res) => {
   try {
     // Step 1: Get all active base products
     const [products] = await pool.query(`
-            SELECT p.id, p.name, p.description, p.brand, p.status, u.name as merchantName
+            SELECT p.id, p.name, p.description, p.brand, p.status, u.store_name as merchantName
             FROM products p
             JOIN users u ON p.merchant_id = u.id
             WHERE p.status = 'active'
@@ -203,7 +203,7 @@ exports.getProductById = async (req, res) => {
     // جلب المنتج الأساسي وبيانات التاجر
     const [productResult] = await pool.query(
       `
-            SELECT p.id, p.name, p.description, p.brand, u.name as merchantName
+            SELECT p.id, p.name, p.description, p.brand, u.store_name as merchantName
             FROM products p
             JOIN users u ON p.merchant_id = u.id
             WHERE p.id = ? AND p.status = 'active';

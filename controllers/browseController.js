@@ -69,7 +69,7 @@ const fetchFullProductData = async (productRows) => {
 exports.getAllModels = async (req, res) => {
   try {
     const [models] = await pool.query(
-      `SELECT id, name, role_id, profile_picture_url, bio, stats 
+      `SELECT id, name, store_name, role_id, profile_picture_url, bio, stats 
        FROM users 
        WHERE role_id IN (3, 4)`
     );
@@ -440,7 +440,7 @@ exports.getTopModels = asyncHandler(async (req, res) => {
   // 💡 ملاحظة: تأكد من أن role_id = 3 هو للمودلز
   // قد يختلف الرقم حسب قاعدة البيانات لديك
   const [models] = await pool.query(
-    `SELECT id, name, profile_picture_url FROM users WHERE role_id = 3 AND is_email_verified = 1 LIMIT ?`,
+    `SELECT id, name, store_name, profile_picture_url FROM users WHERE role_id = 3 AND is_email_verified = 1 LIMIT ?`,
     [limit]
   );
   
@@ -455,7 +455,7 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
 
   // 💡 ملاحظة: تأكد من أن role_id = 2 هو للتاجرات
   const [merchants] = await pool.query(
-    `SELECT id, name, profile_picture_url FROM users WHERE role_id = 2 AND is_email_verified = 1 LIMIT ?`,
+    `SELECT id, name, store_name, profile_picture_url FROM users WHERE role_id = 2 AND is_email_verified = 1 LIMIT ?`,
     [limit]
   );
   

@@ -151,7 +151,7 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
 
     // 1. جلب المنتجات الأساسية للفئة
     const [products] = await pool.query(`
-        SELECT p.id, p.name, p.description, p.brand, p.status, u.name as merchantName,
+        SELECT p.id, p.name, p.description, p.brand, p.status, u.store_name as merchantName,
                (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
                (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount
         FROM products p
