@@ -340,12 +340,9 @@ exports.updateProduct = asyncHandler(async (req, res) => {
     if (!productCheck) {
       console.log("[DEBUG] Product not found or unauthorized access attempt.");
       await connection.rollback();
-      return res
-        .status(404)
-        .json({
-          message:
-            "Product not found or you do not have permission to edit it.",
-        });
+      return res.status(404).json({
+        message: "Product not found or you do not have permission to edit it.",
+      });
     }
 
     // 2. Check if this is a dropshipping product
@@ -501,7 +498,6 @@ exports.updateProduct = asyncHandler(async (req, res) => {
     connection.release();
   }
 });
-
 
 // [GET] جلب جميع الطلبات التي تحتوي على منتجات التاجر
 exports.getOrders = async (req, res) => {
@@ -721,7 +717,7 @@ exports.getSalesAnalytics = async (req, res) => {
 exports.getStoreSettings = async (req, res) => {
   try {
     const [rows] = await pool.query(
-      "SELECT store_name, store_description, store_banner_url, social_links, notifications_prefs, privacy_prefs FROM users WHERE id = ?",
+      "SELECT store_name, store_description, store_banner_url, profile_picture_url, social_links, notifications_prefs, privacy_prefs FROM users WHERE id = ?",
       [req.user.id]
     );
 
@@ -759,17 +755,19 @@ exports.updateStoreSettings = async (req, res) => {
     store_name,
     store_description,
     store_banner_url,
+    profile_picture_url,
     social_links,
     notifications,
     privacy,
   } = req.body;
   try {
     await pool.query(
-      "UPDATE users SET store_name = ?, store_description = ?, store_banner_url = ?, social_links = ?, notifications_prefs = ?, privacy_prefs = ? WHERE id = ?",
+      "UPDATE users SET store_name = ?, store_description = ?, store_banner_url = ?, profile_picture_url = ?, social_links = ?, notifications_prefs = ?, privacy_prefs = ? WHERE id = ?",
       [
         store_name,
         store_description,
         store_banner_url,
+        profile_picture_url,
         JSON.stringify(social_links || {}),
         JSON.stringify(notifications || {}),
         JSON.stringify(privacy || {}),
@@ -935,83 +933,107 @@ exports.promoteProduct = asyncHandler(async (req, res) => {
  * @access  Private (Merchant)
  */
 exports.deleteProduct = asyncHandler(async (req, res) => {
-    const { id: productId } = req.params;
-    const merchantId = req.user.id;
-    const connection = await pool.getConnection();
+  const { id: productId } = req.params;
+  const merchantId = req.user.id;
+  const connection = await pool.getConnection();
 
-    try {
-        await connection.beginTransaction();
+  try {
+    await connection.beginTransaction();
 
-        // 1. التحقق من أن المنتج ينتمي للتاجر
-        const [[product]] = await connection.query(
-            "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
-            [productId, merchantId]
-        );
+    // 1. التحقق من أن المنتج ينتمي للتاجر
+    const [[product]] = await connection.query(
+      "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
+      [productId, merchantId]
+    );
 
-        if (!product) {
-            await connection.rollback();
-            connection.release();
-            return res.status(404).json({ message: "المنتج غير موجود أو لا تملك صلاحية حذفه." });
-        }
-
-        // --- حذف السجلات المرتبطة بالترتيب الصحيح ---
-
-        // 2. جلب معرفات متغيرات هذا المنتج
-        const [variants] = await connection.query(
-            "SELECT id FROM product_variants WHERE product_id = ?",
-            [productId]
-        );
-        const variantIds = variants.map(v => v.id);
-
-        // 3. حذف الروابط من dropship_links (إذا وجدت)
-        if (variantIds.length > 0) {
-            await connection.query(
-                "DELETE FROM dropship_links WHERE merchant_variant_id IN (?)",
-                [variantIds]
-            );
-        }
-
-        // 4. حذف سجلات الترويج المرتبطة بالمنتج (إذا وجدت)
-        await connection.query("DELETE FROM product_promotions WHERE product_id = ?", [productId]);
-
-        // 5. حذف سجلات الاتفاقيات المرتبطة بالمنتج (إذا وجدت)
-        await connection.query("DELETE FROM agreements WHERE product_id = ?", [productId]);
-
-        // 6. حذف تقييمات المنتج (إذا وجدت)
-        await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [productId]);
-
-        // 7. حذف المنتج من قوائم الرغبات (إذا وجد)
-        await connection.query("DELETE FROM wishlist WHERE product_id = ?", [productId]);
-
-        // 8. حذف متغيرات المنتج (إذا كانت مرتبطة بـ ON DELETE CASCADE، سيتم حذفها تلقائيًا عند حذف المنتج)
-        // ✅ [FIX] تم إزالة السطر الذي يشير إلى الجدول غير الموجود `product_variant_images`
-        if (variantIds.length > 0) {
-            // فقط نحذف المتغيرات نفسها، إذا لم تكن ON DELETE CASCADE
-            // إذا كانت ON DELETE CASCADE، يمكن إزالة هذا السطر أيضًا.
-             await connection.query("DELETE FROM product_variants WHERE product_id = ?", [productId]);
-        }
-
-
-        // 9. الآن يمكننا حذف المنتج الرئيسي بأمان
-        await connection.query("DELETE FROM products WHERE id = ?", [productId]);
-
-        // 10. إكمال المعاملة
-        await connection.commit();
-        res.status(200).json({ message: "تم حذف المنتج وجميع بياناته المرتبطة بنجاح." });
-
-    } catch (error) {
-        await connection.rollback();
-        console.error("Error deleting product:", error);
-        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
-             res.status(400).json({ message: "لا يمكن حذف المنتج لوجود بيانات مرتبطة به لم يتم حذفها." , details: error.sqlMessage});
-        } else if (error.code === 'ER_NO_SUCH_TABLE') {
-             res.status(500).json({ message: "خطأ في الخادم: محاولة الوصول إلى جدول غير موجود.", details: error.sqlMessage });
-        } else {
-             res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المنتج." });
-        }
-    } finally {
-        connection.release();
+    if (!product) {
+      await connection.rollback();
+      connection.release();
+      return res
+        .status(404)
+        .json({ message: "المنتج غير موجود أو لا تملك صلاحية حذفه." });
     }
+
+    // --- حذف السجلات المرتبطة بالترتيب الصحيح ---
+
+    // 2. جلب معرفات متغيرات هذا المنتج
+    const [variants] = await connection.query(
+      "SELECT id FROM product_variants WHERE product_id = ?",
+      [productId]
+    );
+    const variantIds = variants.map((v) => v.id);
+
+    // 3. حذف الروابط من dropship_links (إذا وجدت)
+    if (variantIds.length > 0) {
+      await connection.query(
+        "DELETE FROM dropship_links WHERE merchant_variant_id IN (?)",
+        [variantIds]
+      );
+    }
+
+    // 4. حذف سجلات الترويج المرتبطة بالمنتج (إذا وجدت)
+    await connection.query(
+      "DELETE FROM product_promotions WHERE product_id = ?",
+      [productId]
+    );
+
+    // 5. حذف سجلات الاتفاقيات المرتبطة بالمنتج (إذا وجدت)
+    await connection.query("DELETE FROM agreements WHERE product_id = ?", [
+      productId,
+    ]);
+
+    // 6. حذف تقييمات المنتج (إذا وجدت)
+    await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [
+      productId,
+    ]);
+
+    // 7. حذف المنتج من قوائم الرغبات (إذا وجد)
+    await connection.query("DELETE FROM wishlist WHERE product_id = ?", [
+      productId,
+    ]);
+
+    // 8. حذف متغيرات المنتج (إذا كانت مرتبطة بـ ON DELETE CASCADE، سيتم حذفها تلقائيًا عند حذف المنتج)
+    // ✅ [FIX] تم إزالة السطر الذي يشير إلى الجدول غير الموجود `product_variant_images`
+    if (variantIds.length > 0) {
+      // فقط نحذف المتغيرات نفسها، إذا لم تكن ON DELETE CASCADE
+      // إذا كانت ON DELETE CASCADE، يمكن إزالة هذا السطر أيضًا.
+      await connection.query(
+        "DELETE FROM product_variants WHERE product_id = ?",
+        [productId]
+      );
+    }
+
+    // 9. الآن يمكننا حذف المنتج الرئيسي بأمان
+    await connection.query("DELETE FROM products WHERE id = ?", [productId]);
+
+    // 10. إكمال المعاملة
+    await connection.commit();
+    res
+      .status(200)
+      .json({ message: "تم حذف المنتج وجميع بياناته المرتبطة بنجاح." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error deleting product:", error);
+    if (error.code === "ER_ROW_IS_REFERENCED_2") {
+      res
+        .status(400)
+        .json({
+          message: "لا يمكن حذف المنتج لوجود بيانات مرتبطة به لم يتم حذفها.",
+          details: error.sqlMessage,
+        });
+    } else if (error.code === "ER_NO_SUCH_TABLE") {
+      res
+        .status(500)
+        .json({
+          message: "خطأ في الخادم: محاولة الوصول إلى جدول غير موجود.",
+          details: error.sqlMessage,
+        });
+    } else {
+      res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المنتج." });
+    }
+  } finally {
+    connection.release();
+  }
 });
 
 // @desc    Get merchant public profile by ID
@@ -1019,16 +1041,16 @@ exports.deleteProduct = asyncHandler(async (req, res) => {
 // @access  Public
 exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  
+
   // [1] جلب بيانات التاجر
   const [users] = await pool.query(
-    'SELECT id, name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1',
+    "SELECT id, name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1",
     [id]
   );
 
   if (users.length === 0) {
     res.status(404);
-    throw new Error('Merchant not found');
+    throw new Error("Merchant not found");
   }
 
   const merchant = users[0];
@@ -1045,17 +1067,16 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
      FROM products p
      JOIN users u ON p.merchant_id = u.id
      WHERE p.merchant_id = ? AND p.status = "active" 
-     ORDER BY p.created_at DESC`, 
+     ORDER BY p.created_at DESC`,
     [id]
   );
-  
+
   // --- ✨ [3] تنسيق البيانات لتطابق ProductCard.tsx ---
-  const products = rawProducts.map(product => {
-    
+  const products = rawProducts.map((product) => {
     let variantImages = [];
     try {
       // الـ log أثبت أن هذا السطر يرجع ["https://..."]
-      variantImages = JSON.parse(product.variant_images_json || '[]');
+      variantImages = JSON.parse(product.variant_images_json || "[]");
     } catch (e) {
       console.error("Failed to parse images:", product.variant_images_json);
     }
@@ -1076,15 +1097,15 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
       rating: product.rating,
       reviewCount: product.reviewCount,
       merchantName: product.merchantName, // <-- اسم التاجر الذي يبحث عنه ProductCard
-      
+
       // ✨ الأهم: نضع الخيار المزيف داخل مصفوفة variants
-      variants: [simulatedVariant]
+      variants: [simulatedVariant],
     };
   });
   // ----------------------------------------
 
   res.json({
     ...merchant,
-    products: products || [] // <-- إرسال المنتجات بالتنسيق الصحيح
+    products: products || [], // <-- إرسال المنتجات بالتنسيق الصحيح
   });
 });
