@@ -13,7 +13,7 @@ initializeResend();
 initializeCloudinary();
 
 const jwt = require('jsonwebtoken');
-const pool = require("./config/db"); // ✨ تم إضافة هذا السطر لإصلاح الخطأ
+const pool = require("./config/db");
 const cron = require('node-cron');
 const clearPendingFunds = require('./jobs/clearPendingFunds');
 
@@ -113,6 +113,8 @@ const marqueeRoutes = require('./routes/marqueeRoutes');
 app.use('/api/marquee', marqueeRoutes);
 const settingsRoutes = require('./routes/settingsRoutes');
 app.use('/api/settings', settingsRoutes);
+const sectionRoutes = require('./routes/sectionRoutes');
+app.use('/api/sections', sectionRoutes);
 
 // --- Socket.IO Connection Management ---
 const userSocketMap = {};

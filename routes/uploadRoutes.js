@@ -11,7 +11,8 @@ const productStorage = new CloudinaryStorage({
     cloudinary: cloudinary,
     params: {
         folder: 'linora-products',
-        allowed_formats: ['jpeg', 'png', 'jpg']
+        allowed_formats: ['jpeg', 'png', 'jpg', 'webp', 'mp4', 'webm', 'gif'],
+        resource_type: 'auto' 
     }
 });
 const uploadProduct = multer({ storage: productStorage });
