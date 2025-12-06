@@ -1,49 +1,69 @@
 // backend/middleware/uploadMiddleware.js
 const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const {cloudinary} = require('../config/cloudinary'); // <-- هذا هو التعديل
+const { cloudinary } = require('../config/cloudinary');
 
-console.log("--- MW: الدخول إلى uploadMiddleware (إعداد) ---"); // (Log من الخطوة السابقة)
+console.log("--- MW: Upload Middleware Initialized ---");
 
-// إعداد مساحة التخزين في Cloudinary
 const storage = new CloudinaryStorage({
-  cloudinary: cloudinary, // الآن يجب أن يكون هذا الكائن معرفاً وصحيحاً
-  params: async (req, file) => { // <-- (تعديل إضافي مهم جداً) جعل هذه الدالة async
-    console.log(`--- MW: CloudinaryStorage - معالجة ملف: ${file.originalname} ---`); // (Log من الخطوة السابقة)
+  cloudinary: cloudinary,
+  params: async (req, file) => {
+    console.log(`--- MW: Processing file: ${file.originalname} | Field: ${file.fieldname} | Type: ${file.mimetype} ---`);
     
-    // تحديد المجلد بناءً على نوع الرفع (هذا منطق جيد!)
     let folder = 'linora_platform/other';
-    if (file.fieldname === 'video') { // <-- التحقق من اسم الحقل مهم
-      folder = 'linora_platform/reels';
-    } else if (['image', 'images', 'profile_picture', 'store_logo_url', 'store_banner_url'].includes(file.fieldname)) { // توسيع التحقق للصور
-        folder = 'linora_platform/images';
-    } else if (['identity_image_url', 'iban_certificate_url', 'identity_document_url', 'business_license_url'].includes(file.fieldname)) { // توسيع التحقق للمستندات
-        folder = 'linora_platform/documents';
-    }
+    let resource_type = 'auto'; // دع Cloudinary يقرر النوع مبدئياً
+    let allowed_formats = ['jpg', 'png', 'jpeg', 'pdf', 'webp']; // الصيغ الافتراضية
+
+    // 1. التحقق مما إذا كان الملف فيديو (سواء من اسم الحقل أو نوع الملف)
+    const isVideo = file.fieldname === 'video' || file.mimetype.startsWith('video/');
+
+    if (isVideo) {
+        folder = 'linora_platform/reels'; // مجلد الفيديوهات الافتراضي
+        resource_type = 'video';
+        allowed_formats = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
+    } 
     
-    console.log(`--- MW: سيتم الرفع إلى المجلد: ${folder} ---`); // (Log من الخطوة السابقة)
+    // 2. تخصيص المجلدات بناءً على اسم الحقل
+    if (file.fieldname === 'media') {
+        // هذا خاص بالقصص (Stories) حيث يمكن أن يكون فيديو أو صورة
+        folder = 'linora_platform/stories';
+        if (isVideo) {
+            resource_type = 'video';
+            allowed_formats = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
+        } else {
+            resource_type = 'image';
+            allowed_formats = ['jpg', 'png', 'jpeg', 'webp'];
+        }
+    } else if (['image', 'images', 'profile_picture', 'store_logo_url', 'store_banner_url'].includes(file.fieldname)) {
+        folder = 'linora_platform/images';
+        resource_type = 'image';
+        allowed_formats = ['jpg', 'png', 'jpeg', 'webp'];
+    } else if (['identity_image_url', 'iban_certificate_url', 'identity_document_url', 'business_license_url'].includes(file.fieldname)) {
+        folder = 'linora_platform/documents';
+        // المستندات قد تكون صور أو PDF
+        allowed_formats = ['jpg', 'png', 'jpeg', 'pdf'];
+    }
+
+    console.log(`--- MW: Uploading to folder: ${folder} as ${resource_type} ---`);
 
     return {
       folder: folder,
-      resource_type: file.fieldname === 'video' ? 'video' : 'auto', // <-- (تعديل) السماح لـ Cloudinary بتحديد نوع المورد للصور والمستندات
-      allowed_formats: file.fieldname === 'video' ? ['mp4', 'mov', 'mkv'] : ['jpg', 'png', 'jpeg', 'pdf'], // <-- (تعديل) صيغ مختلفة للفيديو والصور
-      public_id: `${Date.now()}-${file.originalname.split('.')[0]}` // اسم فريد للملف
-      // transformation: [{ width: 1024, height: 1024, crop: 'limit' }] // <-- (ملاحظة) هذا التحويل قد لا يعمل جيداً للفيديو أو الـ PDF، ربما تزيله أو تجعله شرطياً
+      resource_type: resource_type,
+      allowed_formats: allowed_formats,
+      public_id: `${Date.now()}-${file.originalname.split('.')[0].replace(/[^a-zA-Z0-9]/g, "_")}` // تنظيف الاسم
     };
   }
 });
 
-// تهيئة Multer مع مساحة التخزين التي أنشأناها
 const upload = multer({ 
-  storage: storage,
+  storage: storage,
   limits: { 
-    fileSize: 1000 * 1024 * 1024 // 100 MB
+    fileSize: 100 * 1024 * 1024 // 100 MB Limit
   },
-  fileFilter: (req, file, cb) => {
-    console.log(`--- MW: Multer fileFilter - التحقق من ملف: ${file.mimetype} ---`); // (Log من الخطوة السابقة)
-    // يمكنك إضافة شروط هنا للتحقق من الملفات إذا أردت
-    cb(null, true);
-  }
+  fileFilter: (req, file, cb) => {
+    // يمكنك رفض الملفات هنا إذا لزم الأمر، حالياً نقبل الجميع لأن Cloudinary سيفلتر الصيغ
+    cb(null, true);
+  }
 });
 
 module.exports = upload;

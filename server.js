@@ -16,6 +16,7 @@ const jwt = require('jsonwebtoken');
 const pool = require("./config/db");
 const cron = require('node-cron');
 const clearPendingFunds = require('./jobs/clearPendingFunds');
+const cleanupStories = require('./jobs/cleanupStories');
 
 const paymentController = require('./controllers/paymentController');
 const app = express();
@@ -31,6 +32,15 @@ cron.schedule('5 1 * * *', () => {
   timezone: "Africa/Cairo" // Set to your server's timezone
 });
 
+// 2. 👇 الوظيفة الجديدة (تنظيف القصص) - تعمل كل ساعة (في الدقيقة 0)
+
+// cron.schedule('0 * * * *', () => {
+//     console.log('--- 🧹 Starting Hourly Cleanup ---');
+//     cleanupStories();
+// }, {
+//     scheduled: true,
+//     timezone: "Africa/Cairo"
+// });
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -115,6 +125,8 @@ const settingsRoutes = require('./routes/settingsRoutes');
 app.use('/api/settings', settingsRoutes);
 const sectionRoutes = require('./routes/sectionRoutes');
 app.use('/api/sections', sectionRoutes);
+const storyRoutes = require('./routes/storyRoutes');
+app.use('/api/stories', storyRoutes);
 
 // --- Socket.IO Connection Management ---
 const userSocketMap = {};

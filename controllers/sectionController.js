@@ -8,6 +8,7 @@ const getActiveSections = async (req, res) => {
              -- جلب اللون والايقونة وكل البيانات الجديدة تلقائياً عبر s.*
              p.name as product_name_en, 
              p.name as product_name_ar, 
+             p.description as product_description, 
              (SELECT price FROM product_variants WHERE product_id = p.id LIMIT 1) as product_price,
              (SELECT JSON_UNQUOTE(JSON_EXTRACT(images, '$[0]')) FROM product_variants WHERE product_id = p.id LIMIT 1) as product_image
       FROM sections s

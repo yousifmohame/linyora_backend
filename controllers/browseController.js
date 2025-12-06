@@ -437,27 +437,122 @@ exports.getTopRated = asyncHandler(async (req, res) => {
 exports.getTopModels = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
 
-  // 💡 ملاحظة: تأكد من أن role_id = 3 هو للمودلز
-  // قد يختلف الرقم حسب قاعدة البيانات لديك
-  const [models] = await pool.query(
-    `SELECT id, name, store_name, profile_picture_url FROM users WHERE role_id = 3 AND is_email_verified = 1 LIMIT ?`,
-    [limit]
-  );
-  
-  res.json(models);
+  // نفترض أن role_id = 3 هو للمودلز (أو المؤثرين)
+  // نقوم بحساب المتابعين من جدول user_follows والتقييم من agreement_reviews
+  const query = `
+    SELECT 
+      u.id, 
+      u.name, 
+      u.profile_picture_url, 
+      u.bio,
+      
+      -- 1. حساب عدد المتابعين الحقيقي
+      (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers,
+      
+      -- 2. حساب متوسط التقييم (من 5)
+      (SELECT COALESCE(AVG(rating), 0) FROM agreement_reviews WHERE reviewee_id = u.id) as rating,
+
+      -- 3. (اختياري) عدد الريلز
+      (SELECT COUNT(*) FROM reels WHERE user_id = u.id AND is_active = 1) as reels_count
+
+    FROM users u
+    WHERE u.role_id = 3 -- تأكد من رقم الدور الخاص بالمودلز في قاعدة بياناتك
+    AND u.is_banned = 0
+    ORDER BY followers DESC
+    LIMIT ?;
+  `;
+
+  const [models] = await pool.query(query, [limit]);
+
+  // تحويل الأرقام من String (SQL result) إلى Number
+  const formattedModels = models.map(model => ({
+    ...model,
+    followers: Number(model.followers),
+    rating: Number(model.rating) > 0 ? Number(model.rating).toFixed(1) : "5.0", // افتراضي 5 للجدد
+    reels_count: Number(model.reels_count)
+  }));
+
+  res.status(200).json(formattedModels);
+});
+
+// @desc    Get top merchants
+exports.getTopModels = asyncHandler(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
+  const currentUserId = req.user ? req.user.id : null; // ✅ معرفة المستخدم الحالي
+
+  const query = `
+    SELECT 
+      u.id, 
+      u.name, 
+      u.profile_picture_url, 
+      
+      (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers,
+      (SELECT COALESCE(AVG(rating), 0) FROM agreement_reviews WHERE reviewee_id = u.id) as rating,
+      
+      -- ✅ هل أتابع هذا الشخص؟
+      ${currentUserId ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0` : 'FALSE'} as isFollowedByMe
+
+    FROM users u
+    WHERE u.role_id = 3 
+    AND u.is_banned = 0
+    ORDER BY followers DESC
+    LIMIT ?;
+  `;
+
+  // نمرر currentUserId إذا وجد، ثم limit
+  const params = currentUserId ? [currentUserId, limit] : [limit];
+  const [models] = await pool.query(query, params);
+
+  const formattedModels = models.map(model => ({
+    ...model,
+    followers: Number(model.followers),
+    rating: Number(model.rating) > 0 ? Number(model.rating).toFixed(1) : "5.0",
+    isFollowedByMe: Boolean(model.isFollowedByMe) // ✅ تحويل لـ Boolean
+  }));
+
+  res.status(200).json(formattedModels);
 });
 
 // @desc    Get top merchants
 // @route   GET /api/browse/top-merchants
-// @access  Public
 exports.getTopMerchants = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
+  const currentUserId = req.user ? req.user.id : null;
 
-  // 💡 ملاحظة: تأكد من أن role_id = 2 هو للتاجرات
-  const [merchants] = await pool.query(
-    `SELECT id, name, store_name, profile_picture_url FROM users WHERE role_id = 2 AND is_email_verified = 1 LIMIT ?`,
-    [limit]
-  );
-  
-  res.json(merchants);
+  const query = `
+    SELECT 
+      u.id, 
+      u.name, 
+      u.store_name,
+      u.profile_picture_url,
+      
+      (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers,
+      (
+        SELECT COALESCE(AVG(pr.rating), 0) 
+        FROM product_reviews pr 
+        JOIN products p ON pr.product_id = p.id 
+        WHERE p.merchant_id = u.id
+      ) as rating,
+
+      -- ✅ هل أتابع هذا التاجر؟
+      ${currentUserId ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0` : 'FALSE'} as isFollowedByMe
+
+    FROM users u
+    WHERE u.role_id = 2
+    AND u.is_banned = 0
+    ORDER BY followers DESC
+    LIMIT ?;
+  `;
+
+  const params = currentUserId ? [currentUserId, limit] : [limit];
+  const [merchants] = await pool.query(query, params);
+
+  const formattedMerchants = merchants.map(merchant => ({
+    ...merchant,
+    followers: Number(merchant.followers),
+    rating: Number(merchant.rating) > 0 ? Number(merchant.rating).toFixed(1) : "New",
+    isFollowedByMe: Boolean(merchant.isFollowedByMe) // ✅ تحويل لـ Boolean
+  }));
+
+  res.status(200).json(formattedMerchants);
 });
