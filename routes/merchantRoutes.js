@@ -30,11 +30,12 @@ const {
     protect,
     restrictTo,
     isVerifiedMerchant,
+    optionalProtect,
 } = require("../middleware/authMiddleware");
 const upload = require("../middleware/uploadMiddleware");
 
 
-router.get('/public-profile/:id', getMerchantPublicProfile);
+router.get('/public-profile/:id', optionalProtect, getMerchantPublicProfile);
 // --- 2. حماية جميع المسارات والتأكد من أن المستخدم هو "تاجر" ---
 router.use(protect, restrictTo(2));
 

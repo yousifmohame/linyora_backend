@@ -1039,13 +1039,41 @@ exports.deleteProduct = asyncHandler(async (req, res) => {
 // @desc    Get merchant public profile by ID
 // @route   GET /api/merchants/public-profile/:id
 // @access  Public
+// backend/controllers/merchantController.js
+
 exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  // [1] جلب بيانات التاجر
+  // 👇 [تعديل هام] نعتمد الآن على optionalProtect
+  // إذا كان المستخدم مسجلاً، سيكون req.user موجوداً. إذا لا، سيكون currentUserId = null
+  const currentUserId = req.user ? req.user.id : null;
+
+  // 1️⃣ جلب بيانات التاجر + الإحصائيات + حالة المتابعة
   const [users] = await pool.query(
-    "SELECT id, name, store_name, profile_picture_url, bio FROM users WHERE id = ? AND role_id = 2 AND is_email_verified = 1",
-    [id]
+    `SELECT 
+        u.id, 
+        u.name, 
+        u.store_name, 
+        u.profile_picture_url, 
+        u.store_banner_url as cover_url, 
+        u.store_description as bio,
+        u.created_at as joined_date,
+        
+        -- تقييم التاجر
+        (SELECT COALESCE(AVG(pr.rating), 0) FROM product_reviews pr JOIN products p ON p.id = pr.product_id WHERE p.merchant_id = u.id) as rating,
+        
+        -- عدد التقييمات
+        (SELECT COUNT(pr.id) FROM product_reviews pr JOIN products p ON p.id = pr.product_id WHERE p.merchant_id = u.id) as reviews_count,
+
+        -- عدد المتابعين
+        (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers_count,
+
+        -- هل يتابعه المستخدم الحالي؟ (سيعمل بشكل صحيح حتى لو كان currentUserId هو null)
+        EXISTS(SELECT 1 FROM user_follows WHERE follower_id = ? AND following_id = u.id) as isFollowedByMe
+
+     FROM users u 
+     WHERE u.id = ? AND u.role_id = 2 AND u.is_email_verified = 1`,
+    [currentUserId, id] 
   );
 
   if (users.length === 0) {
@@ -1055,57 +1083,54 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
 
   const merchant = users[0];
 
-  // [2] جلب المنتجات (نفس الاستعلام الذي جلب البيانات الخام بنجاح)
+  // 2️⃣ جلب المنتجات (نفس الكود السابق تماماً)
   const [rawProducts] = await pool.query(
     `SELECT 
-        p.id, p.name, p.status,
+        p.id, p.name, p.status, p.description,
         u.store_name as merchantName,
         (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
         (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
         (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as price,
-        (SELECT pv.images FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1) as variant_images_json
-     FROM products p
-     JOIN users u ON p.merchant_id = u.id
-     WHERE p.merchant_id = ? AND p.status = "active" 
-     ORDER BY p.created_at DESC`,
+        (SELECT images FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as variant_images_json
+      FROM products p
+      JOIN users u ON p.merchant_id = u.id
+      WHERE p.merchant_id = ? AND p.status = "active" 
+      ORDER BY p.created_at DESC`,
     [id]
   );
 
-  // --- ✨ [3] تنسيق البيانات لتطابق ProductCard.tsx ---
+  // 3️⃣ تنسيق البيانات
   const products = rawProducts.map((product) => {
     let variantImages = [];
     try {
-      // الـ log أثبت أن هذا السطر يرجع ["https://..."]
       variantImages = JSON.parse(product.variant_images_json || "[]");
     } catch (e) {
-      console.error("Failed to parse images:", product.variant_images_json);
+      console.error(`Image parse error for product ${product.id}`);
     }
 
-    // [الحل] نقوم بإنشاء "خيار" (variant) واحد فقط
-    // ونضع فيه البيانات التي يتوقعها ProductCard
-    const simulatedVariant = {
-      price: product.price || 0,
-      compare_at_price: product.compare_at_price || null, // (لم نجلب هذا، لكن null آمن)
-      images: variantImages, // <-- مصفوفة الصور التي يبحث عنها ProductCard
-    };
-
     return {
-      // البيانات الأساسية للمنتج
       id: product.id,
       name: product.name,
+      description: product.description,
       status: product.status,
-      rating: product.rating,
-      reviewCount: product.reviewCount,
-      merchantName: product.merchantName, // <-- اسم التاجر الذي يبحث عنه ProductCard
-
-      // ✨ الأهم: نضع الخيار المزيف داخل مصفوفة variants
-      variants: [simulatedVariant],
+      rating: Number(product.rating) || 0,
+      reviewCount: Number(product.reviewCount) || 0,
+      merchantName: product.merchantName,
+      variants: [{
+        id: 0,
+        price: product.price || 0,
+        compare_at_price: null,
+        images: variantImages,
+      }],
     };
   });
-  // ----------------------------------------
 
   res.json({
     ...merchant,
-    products: products || [], // <-- إرسال المنتجات بالتنسيق الصحيح
+    rating: Number(merchant.rating).toFixed(1), 
+    reviews_count: Number(merchant.reviews_count),
+    followers_count: Number(merchant.followers_count),
+    isFollowedByMe: Boolean(merchant.isFollowedByMe), 
+    products: products || [],
   });
 });

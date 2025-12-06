@@ -144,12 +144,21 @@ exports.deleteCategory = asyncHandler(async (req, res) => {
 exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     const { slug } = req.params;
 
+    // 1. جلب بيانات الفئة الأساسية (ID والاسم)
     const [[category]] = await pool.query("SELECT id, name FROM categories WHERE slug = ?", [slug]);
+    
     if (!category) {
         return res.status(404).json({ message: "Category not found" });
     }
 
-    // 1. جلب المنتجات الأساسية للفئة
+    // 🆕 2. جلب التصنيفات الفرعية (Subcategories)
+    // هذا الاستعلام يجلب أي تصنيف يكون فيه parent_id مساوياً لـ ID الفئة الحالية
+    const [subcategories] = await pool.query(
+        "SELECT id, name, slug, image_url FROM categories WHERE parent_id = ?",
+        [category.id]
+    );
+
+    // 3. جلب المنتجات المرتبطة بهذه الفئة
     const [products] = await pool.query(`
         SELECT p.id, p.name, p.description, p.brand, p.status, u.store_name as merchantName,
                (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
@@ -158,34 +167,64 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
         JOIN users u ON p.merchant_id = u.id
         JOIN product_categories pc ON p.id = pc.product_id
         WHERE p.status = 'active' AND pc.category_id = ?
+        ORDER BY p.created_at DESC
     `, [category.id]);
 
+    // إذا لم تكن هناك منتجات، نرجع المصفوفات فارغة ولكن مع التصنيفات الفرعية إن وجدت
     if (products.length === 0) {
-        return res.status(200).json({ products: [], categoryName: category.name });
+        return res.status(200).json({ 
+            products: [], 
+            categoryName: category.name,
+            subcategories: subcategories || [] // 👈 إرسال التصنيفات الفرعية
+        });
     }
 
-    // 2. جلب متغيرات هذه المنتجات (الجزء المفقود)
+    // 4. جلب المتغيرات (Variants) للمنتجات الموجودة فقط
     const productIds = products.map(p => p.id);
-    const [variants] = await pool.query(
-        'SELECT * FROM product_variants WHERE product_id IN (?) AND stock_quantity > 0',
-        [productIds]
-    );
+    
+    // استخدام IF للحماية من خطأ SQL في حال كانت المصفوفة فارغة (رغم أننا فحصنا الطول أعلاه)
+    let variants = [];
+    if (productIds.length > 0) {
+        const [rows] = await pool.query(
+            'SELECT * FROM product_variants WHERE product_id IN (?) AND stock_quantity > 0',
+            [productIds]
+        );
+        variants = rows;
+    }
 
+    // تجميع المتغيرات حسب product_id
     const variantsMap = new Map();
     variants.forEach(variant => {
-        try { variant.images = JSON.parse(variant.images); } catch (e) { variant.images = []; }
+        try { 
+            // محاولة تحليل الصور، مع وضع مصفوفة فارغة كاحتياطي
+            variant.images = typeof variant.images === 'string' ? JSON.parse(variant.images) : variant.images; 
+        } catch (e) { 
+            variant.images = []; 
+        }
+        
         const items = variantsMap.get(variant.product_id) || [];
         items.push(variant);
         variantsMap.set(variant.product_id, items);
     });
 
-    // 3. دمج المنتجات مع متغيراتها
-    const productsWithData = products.map(product => ({
-        ...product,
-        variants: variantsMap.get(product.id) || [], // <-- ضمان وجود مصفوفة المتغيرات
-        rating: parseFloat(product.rating) || 0,
-        reviewCount: parseInt(product.reviewCount, 10) || 0,
-    })).filter(p => p.variants.length > 0);
+    // 5. دمج المنتجات مع متغيراتها وتنسيق الأرقام
+    const productsWithData = products.map(product => {
+        const productVariants = variantsMap.get(product.id) || [];
+        
+        // (اختياري) إذا كنت تريد استبعاد المنتجات التي ليس لها متغيرات، يمكنك فعل ذلك لاحقاً بالفلتر
+        
+        return {
+            ...product,
+            variants: productVariants,
+            rating: parseFloat(product.rating) || 0,
+            reviewCount: parseInt(product.reviewCount, 10) || 0,
+        };
+    }).filter(p => p.variants.length > 0); // إخفاء المنتجات التي ليس لها متغيرات (Stock = 0)
 
-    res.status(200).json({ products: productsWithData, categoryName: category.name });
+    // 6. إرسال الاستجابة النهائية
+    res.status(200).json({ 
+        products: productsWithData, 
+        categoryName: category.name,
+        subcategories: subcategories || [] // 👈 إرسال التصنيفات الفرعية هنا
+    });
 });
