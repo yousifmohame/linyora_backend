@@ -16,6 +16,7 @@ const {
   getUserPublicProfile,
   followUser,
   unfollowUser,
+  getUserStats
 } = require("../controllers/userController"); // ✨ استيراد الدوال الجديدة
 const { protect , optionalProtect} = require("../middleware/authMiddleware");
 
@@ -25,6 +26,8 @@ router
   .route("/profile")
   .get(protect, getUserProfile)
   .put(protect, updateUserProfile);
+
+router.get("/stats", protect, getUserStats);
 
 router.route("/profile/accept-agreement").put(protect, acceptAgreement);
 

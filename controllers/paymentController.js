@@ -437,6 +437,114 @@ const createAgreementPaymentIntent = async (req, res) => {
   }
 };
 
+// --- Helper: Get or Create Stripe Customer ---
+const getOrCreateCustomer = async (user) => {
+  const stripe = getStripe();
+  
+  // 1. إذا كان لدينا الـ ID في التوكن أو الذاكرة
+  if (user.stripe_customer_id) return user.stripe_customer_id;
+
+  // 2. التحقق من قاعدة البيانات
+  const [[dbUser]] = await pool.query("SELECT stripe_customer_id FROM users WHERE id = ?", [user.id]);
+  if (dbUser && dbUser.stripe_customer_id) {
+    return dbUser.stripe_customer_id;
+  }
+
+  // 3. إنشاء عميل جديد في Stripe
+  const customer = await stripe.customers.create({
+    email: user.email,
+    name: user.name,
+    metadata: { userId: user.id }
+  });
+
+  // 4. حفظ الـ ID في قاعدة البيانات
+  await pool.query("UPDATE users SET stripe_customer_id = ? WHERE id = ?", [customer.id, user.id]);
+  
+  return customer.id;
+};
+
+/**
+ * @desc    Get all saved payment methods for the user
+ * @route   GET /api/payments/methods
+ * @access  Private
+ */
+const getPaymentMethods = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const customerId = await getOrCreateCustomer(req.user);
+
+  // جلب البطاقات المحفوظة
+  const paymentMethods = await stripe.paymentMethods.list({
+    customer: customerId,
+    type: 'card',
+  });
+
+  // جلب العميل لمعرفة البطاقة الافتراضية
+  const customer = await stripe.customers.retrieve(customerId);
+  const defaultPaymentMethodId = customer.invoice_settings.default_payment_method;
+
+  const methods = paymentMethods.data.map(pm => ({
+    id: pm.id,
+    brand: pm.card.brand,
+    last4: pm.card.last4,
+    exp_month: pm.card.exp_month,
+    exp_year: pm.card.exp_year,
+    is_default: pm.id === defaultPaymentMethodId
+  }));
+
+  res.json(methods);
+});
+
+/**
+ * @desc    Create a SetupIntent to save a card
+ * @route   POST /api/payments/setup-intent
+ * @access  Private
+ */
+const createSetupIntent = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const customerId = await getOrCreateCustomer(req.user);
+
+  const setupIntent = await stripe.setupIntents.create({
+    customer: customerId,
+    payment_method_types: ['card'],
+  });
+
+  res.json({ clientSecret: setupIntent.client_secret });
+});
+
+/**
+ * @desc    Delete a payment method
+ * @route   DELETE /api/payments/methods/:id
+ * @access  Private
+ */
+const deletePaymentMethod = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const { id } = req.params;
+
+  try {
+    await stripe.paymentMethods.detach(id);
+    res.json({ message: "تم حذف البطاقة بنجاح" });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+/**
+ * @desc    Set default payment method
+ * @route   PUT /api/payments/methods/:id/default
+ * @access  Private
+ */
+const setDefaultPaymentMethod = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const { id } = req.params;
+  const customerId = await getOrCreateCustomer(req.user);
+
+  await stripe.customers.update(customerId, {
+    invoice_settings: { default_payment_method: id },
+  });
+
+  res.json({ message: "تم تحديث البطاقة الافتراضية" });
+});
+
 module.exports = {
   createSubscriptionSession,
   createCheckoutSessionForProducts,
@@ -444,4 +552,8 @@ module.exports = {
   cancelSubscription,
   createAgreementPaymentIntent,
   createAgreementCheckoutSession,
+  getPaymentMethods,      // ✨ جديد
+  createSetupIntent,      // ✨ جديد
+  deletePaymentMethod,    // ✨ جديد
+  setDefaultPaymentMethod // 
 };

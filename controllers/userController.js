@@ -551,3 +551,79 @@ exports.getUserPublicProfile = asyncHandler( async (req, res) => {
     res.status(500).json({ message: 'Server error while fetching user profile' });
   }
 });
+
+// backend/controllers/userController.js
+
+/**
+ * @desc    Get user stats (Orders count, Points, Favorites)
+ * @route   GET /api/users/stats
+ * @access  Private
+ */
+exports.getUserStats = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+        // 1. حساب عدد الطلبات المكتملة فقط (status = 'delivered')
+        // ملاحظة: تأكد أن اسم العمود هو user_id أو customer_id حسب جدول orders لديك
+        const [ordersResult] = await pool.query(
+            "SELECT COUNT(*) as count FROM orders WHERE customer_id = ? AND status = 'completed'",
+            [userId]
+        );
+        const completedOrders = ordersResult[0].count || 0;
+
+        // 2. حساب النقاط (10 نقاط لكل طلب مكتمل)
+        const points = completedOrders * 10;
+
+        // 3. حساب عدد العناصر في المفضلة (Wishlist)
+        // ملاحظة: تأكد من اسم جدول المفضلة (wishlist أو favorites)
+        const [wishlistResult] = await pool.query(
+            "SELECT COUNT(*) as count FROM wishlist WHERE user_id = ?",
+            [userId]
+        );
+        const favoritesCount = wishlistResult[0].count || 0;
+
+        const [notifResult] = await pool.query(
+            "SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = FALSE",
+            [userId]
+        );
+
+        const unreadNotifications = notifResult[0].count || 0;
+
+        // 4. منطق تحديد مستوى العضوية (Membership Level)
+        let membership = 'Bronze';
+        let nextLevelPoints = 100;
+        let progress = 0;
+
+        if (points < 100) {
+            membership = 'Bronze';
+            nextLevelPoints = 100;
+            progress = (points / 100) * 100;
+        } else if (points < 500) {
+            membership = 'Silver';
+            nextLevelPoints = 500;
+            progress = ((points - 100) / 400) * 100;
+        } else if (points < 1000) {
+            membership = 'Gold';
+            nextLevelPoints = 1000;
+            progress = ((points - 500) / 500) * 100;
+        } else {
+            membership = 'Platinum';
+            nextLevelPoints = 0; // وصل للحد الأقصى
+            progress = 100;
+        }
+
+        res.status(200).json({
+            orders: completedOrders,
+            points: points,
+            favorites: favoritesCount,
+            notifications: unreadNotifications,
+            membership: membership,
+            progress: Math.round(progress), // نسبة مئوية صحيحة
+            nextLevelPoints: nextLevelPoints > 0 ? nextLevelPoints - points : 0
+        });
+
+    } catch (error) {
+        console.error("Error fetching user stats:", error);
+        res.status(500).json({ message: "Server Error fetching stats" });
+    }
+});
