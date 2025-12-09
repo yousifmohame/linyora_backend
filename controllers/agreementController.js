@@ -1,6 +1,7 @@
 // controllers/agreementController.js
 const pool = require("../config/db");
 const sendEmail = require("../utils/emailService");
+const templates = require("../utils/emailTemplates");
 const { getStripe } = require("../config/stripe");
 
 // [POST] إنشاء اتفاق جديد
@@ -17,7 +18,7 @@ exports.createAgreement = async (req, res) => {
 
   try {
     // تم تحديث استعلام INSERT لاستخدام package_tier_id
-    const [result] = await pool.query(
+    const [result] = await connection.query(
       "INSERT INTO agreements (merchant_id, model_id, product_id, package_tier_id, status, stripe_payment_intent_id) VALUES (?, ?, ?, ?, ?, ?)",
       [
         merchant_id,
@@ -29,7 +30,49 @@ exports.createAgreement = async (req, res) => {
       ]
     );
 
-    // (إرسال إشعار للمودل)
+    // 2. جلب بيانات المودل والتاجر والباقة للإيميل
+    const [[details]] = await connection.query(
+      `
+        SELECT 
+            m.email as model_email, m.name as model_name,
+            u.name as merchant_name,
+            sp.title as package_title
+        FROM users m
+        JOIN users u ON u.id = ?
+        JOIN package_tiers pt ON pt.id = ?
+        JOIN service_packages sp ON pt.package_id = sp.id
+        WHERE m.id = ?
+    `,
+      [merchant_id, package_tier_id, model_id]
+    );
+
+    await connection.commit();
+
+    // --- 🔔 الإشعارات ---
+    if (details) {
+      // إشعار الموقع
+      await connection.query(
+        "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+        [
+          model_id,
+          "NEW_OFFER",
+          "briefcase",
+          `عرض تعاون جديد من ${details.merchant_name}`,
+          "/dashboard/requests",
+        ]
+      );
+
+      // إشعار الإيميل
+      sendEmail({
+        to: details.model_email,
+        subject: `عرض تعاون جديد من ${details.merchant_name}`,
+        html: templates.newAgreementRequest(
+          details.model_name,
+          details.merchant_name,
+          details.package_title
+        ),
+      }).catch(console.error);
+    }
 
     res.status(201).json({
       message: "تم إرسال طلب التعاون بنجاح!",
@@ -49,11 +92,9 @@ exports.createAgreement = async (req, res) => {
         "Error cancelling payment intent after agreement failure:",
         cancelError
       );
-      res
-        .status(500)
-        .json({
-          message: "خطأ فادح: فشل إنشاء الاتفاق وفشل إلغاء حجز المبلغ.",
-        });
+      res.status(500).json({
+        message: "خطأ فادح: فشل إنشاء الاتفاق وفشل إلغاء حجز المبلغ.",
+      });
     }
   }
 };
@@ -195,16 +236,14 @@ exports.updateAgreementStatus = async (req, res) => {
       .json({ message: `تم تحديث الطلب، ولكن فشل إرسال الإشعار.` });
   }
 };
-
-// (المتطلبات في أعلى الملف: pool, getStripe, sendEmail...)
-
 /**
- * 1. (الموديل) الاستجابة لطلب اتفاق (قبول أو رفض)
- * PENDING -> ACCEPTED أو PENDING -> REJECTED
+ * @desc    Respond to agreement (Accept/Reject)
+ * @route   PUT /api/agreements/:id/respond
+ * @access  Private (Model)
  */
 exports.respondToAgreement = async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body; // "accepted" or "rejected"
+  const { status } = req.body;
   const model_id = req.user.id;
 
   if (!["accepted", "rejected"].includes(status)) {
@@ -212,12 +251,12 @@ exports.respondToAgreement = async (req, res) => {
   }
 
   const connection = await pool.getConnection();
-  let agreementDetailsForEmail;
+  let emailDetails = null;
 
   try {
     await connection.beginTransaction();
 
-    // إضافة "AND status = 'pending'" للتحقق من أن الطلب لم يتم التعامل معه مسبقاً
+    // 1. تحديث الحالة
     const [result] = await connection.query(
       "UPDATE agreements SET status = ? WHERE id = ? AND model_id = ? AND status = 'pending'",
       [status, id, model_id]
@@ -228,81 +267,77 @@ exports.respondToAgreement = async (req, res) => {
       connection.release();
       return res
         .status(404)
-        .json({ message: "الطلب غير موجود، أو لا تملك صلاحية تعديله، أو تم التعامل معه مسبقاً" });
+        .json({ message: "الطلب غير موجود أو تمت معالجته مسبقاً" });
     }
 
-    const [details] = await connection.query(
-      `SELECT 
-         a.merchant_id, a.stripe_payment_intent_id,
-         u.email as merchant_email, 
-         sp.title as package_title
-       FROM agreements a 
-       JOIN users u ON a.merchant_id = u.id
-       JOIN package_tiers pt ON a.package_tier_id = pt.id
-       JOIN service_packages sp ON pt.package_id = sp.id
-       WHERE a.id = ?`,
+    // 2. جلب البيانات للإيميل و Stripe
+    const [[details]] = await connection.query(
+      `
+        SELECT 
+            a.merchant_id, a.stripe_payment_intent_id,
+            u.email as merchant_email, u.name as merchant_name,
+            m.name as model_name,
+            sp.title as package_title
+        FROM agreements a 
+        JOIN users u ON a.merchant_id = u.id
+        JOIN users m ON a.model_id = m.id
+        JOIN package_tiers pt ON a.package_tier_id = pt.id
+        JOIN service_packages sp ON pt.package_id = sp.id
+        WHERE a.id = ?`,
       [id]
     );
-    agreementDetailsForEmail = details.length > 0 ? details[0] : null;
+    emailDetails = details;
 
-    // منطق Stripe (ممتاز كما هو)
-    if (
-      status === "rejected" &&
-      agreementDetailsForEmail?.stripe_payment_intent_id
-    ) {
+    // 3. إذا تم الرفض، نلغي حجز المبلغ
+    if (status === "rejected" && emailDetails?.stripe_payment_intent_id) {
       const stripe = getStripe();
-      await stripe.paymentIntents.cancel(
-        agreementDetailsForEmail.stripe_payment_intent_id
-      );
+      await stripe.paymentIntents.cancel(emailDetails.stripe_payment_intent_id);
     }
 
     await connection.commit();
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error in respondToAgreement:", error);
-    return res.status(500).json({ message: "خطأ في تحديث حالة الطلب" });
-  } finally {
-    connection.release();
-  }
 
-  // --- الإشعارات والبريد الإلكتروني (ممتاز كما هو) ---
-  try {
-    const statusInArabic = status === "accepted" ? "قبول" : "رفض";
+    // --- 🔔 الإشعارات (بعد الـ Commit) ---
+    if (emailDetails) {
+      const statusMsg = status === "accepted" ? "قبول" : "رفض";
 
-    if (agreementDetailsForEmail) {
-      const { merchant_id, merchant_email, package_title } =
-        agreementDetailsForEmail;
-      const notificationMessage = `تم ${statusInArabic} طلب التعاون الخاص بك بخصوص باقة: "${package_title}"`;
-
-      await pool.query(
-        "INSERT INTO notifications (user_id, type, message, link) VALUES (?, ?, ?, ?)",
+      // إشعار الموقع للتاجر
+      await connection.query(
+        "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
         [
-          merchant_id,
-          "AGREEMENT_STATUS",
-          notificationMessage,
+          emailDetails.merchant_id,
+          "AGREEMENT_UPDATE",
+          status === "accepted" ? "check" : "x",
+          `تم ${statusMsg} عرض التعاون الخاص بباقة "${emailDetails.package_title}"`,
           "/dashboard/agreements",
         ]
       );
 
-      await sendEmail({
-        to: merchant_email,
-        subject: `تحديث بخصوص طلب التعاون على منصة لينورا`,
-        html: `<div dir="rtl"><h3>تحديث حالة طلب التعاون</h3><p>${notificationMessage}</p><p><a href="${process.env.FRONTEND_URL}/dashboard/agreements">اضغط هنا لمراجعة طلباتك</a></p></div>`,
-      });
+      // إيميل التاجر
+      sendEmail({
+        to: emailDetails.merchant_email,
+        subject: `تحديث حالة طلب التعاون - ${emailDetails.package_title}`,
+        html: templates.agreementStatusUpdate(
+          emailDetails.merchant_name,
+          emailDetails.model_name,
+          status,
+          emailDetails.package_title
+        ),
+      }).catch(console.error);
     }
 
-    res.status(200).json({ message: `تم ${statusInArabic} الطلب بنجاح` });
-  } catch (postCommitError) {
-    console.error(
-      "Failed to send notification/email after status update:",
-      postCommitError
-    );
     res
       .status(200)
-      .json({ message: `تم تحديث الطلب، ولكن فشل إرسال الإشعار.` });
+      .json({
+        message: `تم ${status === "accepted" ? "قبول" : "رفض"} الطلب بنجاح`,
+      });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error in respondToAgreement:", error);
+    res.status(500).json({ message: "خطأ في تحديث حالة الطلب" });
+  } finally {
+    connection.release();
   }
 };
-
 /**
  * 2. (الموديل) بدء تنفيذ الاتفاقية
  * ACCEPTED -> IN_PROGRESS
@@ -321,8 +356,36 @@ exports.startAgreementProgress = async (req, res) => {
       return res.status(404).json({ message: "لا يمكن بدء تنفيذ هذا الطلب. (إما غير موجود أو ليس بحالة 'مقبول')" });
     }
 
-    // إرسال إشعار للتاجر (اختياري لكن موصى به)
-    // ... (كود إرسال الإشعار) ...
+    // --- 🔔 الإشعارات (للتاجر) ---
+    const [details] = await pool.query(`
+        SELECT 
+            u.id as merchant_id, u.email as merchant_email, u.name as merchant_name,
+            m.name as model_name,
+            sp.title as package_title
+        FROM agreements a
+        JOIN users u ON a.merchant_id = u.id
+        JOIN users m ON a.model_id = m.id
+        JOIN package_tiers pt ON a.package_tier_id = pt.id
+        JOIN service_packages sp ON pt.package_id = sp.id
+        WHERE a.id = ?
+    `, [id]);
+
+    if (details.length > 0) {
+        const info = details[0];
+        
+        // إشعار الموقع
+        await pool.query(
+            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+            [info.merchant_id, "AGREEMENT_UPDATE", "clock", `بدأ ${info.model_name} العمل على الاتفاق: "${info.package_title}"`, "/dashboard/agreements"]
+        );
+
+        // إشعار الإيميل
+        sendEmail({
+            to: info.merchant_email,
+            subject: `🚀 بدء العمل على الاتفاق - ${info.package_title}`,
+            html: templates.agreementStarted(info.merchant_name, info.model_name, info.package_title)
+        }).catch(console.error);
+    }
 
     res.status(200).json({ message: "تم تحديث حالة الطلب إلى 'قيد التنفيذ'" });
   } catch (error) {
@@ -330,7 +393,6 @@ exports.startAgreementProgress = async (req, res) => {
     res.status(500).json({ message: "خطأ في الخادم" });
   }
 };
-
 /**
  * 3. (الموديل) تسليم العمل
  * IN_PROGRESS -> DELIVERED
@@ -338,7 +400,6 @@ exports.startAgreementProgress = async (req, res) => {
 exports.deliverAgreement = async (req, res) => {
   const { id } = req.params;
   const model_id = req.user.id;
-  // يمكنك إضافة req.body.delivery_notes أو req.files إذا كان التسليم يتضمن ملفات
   
   try {
     const [result] = await pool.query(
@@ -350,8 +411,36 @@ exports.deliverAgreement = async (req, res) => {
       return res.status(404).json({ message: "لا يمكن تسليم هذا الطلب. (إما غير موجود أو ليس 'قيد التنفيذ')" });
     }
 
-    // إرسال إشعار للتاجر بأن الموديل قام بالتسليم
-    // ... (كود إرسال الإشعار) ...
+    // --- 🔔 الإشعارات (للتاجر) ---
+    const [details] = await pool.query(`
+        SELECT 
+            u.id as merchant_id, u.email as merchant_email, u.name as merchant_name,
+            m.name as model_name,
+            sp.title as package_title
+        FROM agreements a
+        JOIN users u ON a.merchant_id = u.id
+        JOIN users m ON a.model_id = m.id
+        JOIN package_tiers pt ON a.package_tier_id = pt.id
+        JOIN service_packages sp ON pt.package_id = sp.id
+        WHERE a.id = ?
+    `, [id]);
+
+    if (details.length > 0) {
+        const info = details[0];
+        
+        // إشعار الموقع
+        await pool.query(
+            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+            [info.merchant_id, "AGREEMENT_UPDATE", "package", `قام ${info.model_name} بتسليم العمل لـ "${info.package_title}". يرجى المراجعة.`, "/dashboard/agreements"]
+        );
+
+        // إشعار الإيميل
+        sendEmail({
+            to: info.merchant_email,
+            subject: `📦 تم تسليم العمل - ${info.package_title}`,
+            html: templates.agreementDelivered(info.merchant_name, info.model_name, info.package_title)
+        }).catch(console.error);
+    }
 
     res.status(200).json({ message: "تم تسليم الطلب بنجاح وفي انتظار تأكيد التاجر" });
   } catch (error) {
@@ -360,9 +449,8 @@ exports.deliverAgreement = async (req, res) => {
   }
 };
 
-// --- ✨ الدالة الجديدة التي تسمح للتاجر بإكمال الاتفاق ✨ ---
 /**
- * @desc    Allows a merchant to mark an agreement as complete
+ * @desc    Merchant marks agreement as complete (Release funds)
  * @route   PUT /api/agreements/:id/complete
  * @access  Private (Merchant)
  */
@@ -371,11 +459,12 @@ exports.completeAgreementByMerchant = async (req, res) => {
   const merchant_id = req.user.id;
 
   const connection = await pool.getConnection();
-  let agreementDetails;
+  let emailDetails = null;
 
   try {
     await connection.beginTransaction();
 
+    // 1. التحقق من الاتفاق
     const [[agreement]] = await connection.query(
       "SELECT * FROM agreements WHERE id = ? AND merchant_id = ? FOR UPDATE",
       [agreementId, merchant_id]
@@ -383,105 +472,107 @@ exports.completeAgreementByMerchant = async (req, res) => {
 
     if (!agreement) {
       await connection.rollback();
-      return res
-        .status(404)
-        .json({ message: "الاتفاق غير موجود أو لا تملكه." });
+      return res.status(404).json({ message: "الاتفاق غير موجود." });
     }
     if (agreement.status !== "delivered") {
       await connection.rollback();
-      return res.status(400).json({
-        message: `لا يمكن إكمال هذا الاتفاق لأنه في حالة '${agreement.status}'`,
-      });
+      return res
+        .status(400)
+        .json({ message: "يجب أن يكون الاتفاق في حالة 'تم التسليم' أولاً." });
     }
 
+    // 2. تحديث الحالة
     await connection.query(
       "UPDATE agreements SET status = 'completed' WHERE id = ?",
       [agreementId]
     );
 
-    // ✨ Updated query to get details from the correct tables
+    // 3. جلب البيانات للحسابات والإيميل
     const [details] = await connection.query(
       `SELECT 
-                a.model_id, a.stripe_payment_intent_id,
-                pt.price as tierPrice,
-                sp.title as packageTitle,
-                m.email as merchant_email, 
-                mo.email as model_email
-            FROM agreements a
-            JOIN package_tiers pt ON a.package_tier_id = pt.id
-            JOIN service_packages sp ON pt.package_id = sp.id
-            JOIN users m ON a.merchant_id = m.id
-            JOIN users mo ON a.model_id = mo.id
-            WHERE a.id = ?`,
+            a.model_id, a.stripe_payment_intent_id,
+            pt.price as tierPrice,
+            sp.title as packageTitle,
+            m.name as model_name,
+            m.email as model_email
+        FROM agreements a
+        JOIN package_tiers pt ON a.package_tier_id = pt.id
+        JOIN service_packages sp ON pt.package_id = sp.id
+        JOIN users m ON a.model_id = m.id
+        WHERE a.id = ?`,
       [agreementId]
     );
-    agreementDetails = details[0];
+    emailDetails = details[0];
 
-    const { model_id, tierPrice } = agreementDetails;
+    // 4. حساب الأرباح (بعد خصم العمولة) وإضافتها للمحفظة
+    const { model_id, tierPrice } = emailDetails;
+
+    // جلب نسبة العمولة من الإعدادات (افتراضي 10% إذا لم توجد)
     const [settings] = await connection.query(
       "SELECT setting_value FROM platform_settings WHERE setting_key = 'agreement_commission_rate'"
     );
-    if (settings.length === 0) throw new Error("Commission rate not set.");
+    const commissionRate =
+      settings.length > 0 ? parseFloat(settings[0].setting_value) : 10;
 
-    const commissionRate = parseFloat(settings[0].setting_value);
     const netEarnings = tierPrice - (tierPrice * commissionRate) / 100;
 
     await connection.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, status, related_entity_type, related_entity_id, description) VALUES (?, ?, 'earning', 'pending_clearance', 'agreement', ?, ?)`,
+      `INSERT INTO wallet_transactions (user_id, amount, type, status, related_entity_type, related_entity_id, description) 
+       VALUES (?, ?, 'earning', 'pending_clearance', 'agreement', ?, ?)`,
       [
         model_id,
         netEarnings,
         agreementId,
-        `Earnings from agreement: ${agreementDetails.packageTitle}`,
+        `أرباح اتفاق: ${emailDetails.packageTitle}`,
       ]
     );
 
     await connection.commit();
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error completing agreement by merchant:", error);
-    return res.status(500).json({ message: "فشل في إكمال الاتفاق." });
-  } finally {
-    connection.release();
-  }
 
-  // Post-commit actions
-  try {
-    if (agreementDetails && agreementDetails.stripe_payment_intent_id) {
-      const stripe = getStripe();
-      await stripe.paymentIntents.capture(
-        agreementDetails.stripe_payment_intent_id
-      );
-      console.log(
-        `Stripe payment captured for intent: ${agreementDetails.stripe_payment_intent_id}`
-      );
+    // --- ما بعد الـ Commit (Stripe Capture & Notifications) ---
+
+    // أ) سحب المبلغ فعلياً من Stripe
+    if (emailDetails.stripe_payment_intent_id) {
+      try {
+        const stripe = getStripe();
+        await stripe.paymentIntents.capture(
+          emailDetails.stripe_payment_intent_id
+        );
+      } catch (stripeError) {
+        console.error("Stripe Capture Error:", stripeError);
+        // ملاحظة: العملية نجحت في الداتابيس، خطأ سترايب هنا يتطلب تدخلاً يدوياً أو Retry Logic
+      }
     }
 
-    const { model_id, model_email, packageTitle } = agreementDetails;
-    const notificationMessage = `قام التاجر بتأكيد اكتمال التعاون الخاص بباقة: "${packageTitle}". تم إضافة أرباحك إلى رصيدك المعلق.`;
+    // ب) الإشعارات
+    const { model_email, model_name, packageTitle } = emailDetails;
 
-    await pool.query(
-      "INSERT INTO notifications (user_id, type, message, link) VALUES (?, ?, ?, ?)",
+    // إشعار الموقع
+    await connection.query(
+      "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
       [
         model_id,
         "AGREEMENT_COMPLETED",
-        notificationMessage,
+        "dollar-sign",
+        `تم إكمال اتفاق "${packageTitle}" وإيداع الأرباح.`,
         "/dashboard/models/wallet",
       ]
     );
-    await sendEmail({
+
+    // إيميل المودل
+    sendEmail({
       to: model_email,
-      subject: `تهانينا! تم إكمال اتفاق "${packageTitle}"`,
-      html: `<p>${notificationMessage}</p>`,
-    });
+      subject: `💰 مبروك! دفعة جديدة من اتفاق "${packageTitle}"`,
+      html: templates.agreementCompleted(model_name, packageTitle, netEarnings),
+    }).catch(console.error);
 
     res.status(200).json({ message: "تم تأكيد اكتمال الاتفاق بنجاح." });
-  } catch (postCommitError) {
-    console.error("Post-commit error (Stripe/Email):", postCommitError);
-    res.status(200).json({
-      message:
-        "تم تأكيد الاتفاق، ولكن حدث خطأ أثناء معالجة الدفع أو الإشعارات.",
-    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error completing agreement:", error);
+    res.status(500).json({ message: "فشل في إكمال الاتفاق." });
+  } finally {
+    connection.release();
   }
 };
 
@@ -584,12 +675,14 @@ exports.createAgreementReview = async (req, res) => {
 // @route   GET /api/v1/agreements/active-for-user
 // @access  Protected (Models, Influencers)
 exports.getActiveAgreementsForUser = async (req, res) => {
-    const userId = req.user.id; // ID المؤثرة الحالية
+  const userId = req.user.id; // ID المؤثرة الحالية
 
-    console.log(`--- GetActiveAgreements: Fetching active agreements for User ID: ${userId} ---`);
+  console.log(
+    `--- GetActiveAgreements: Fetching active agreements for User ID: ${userId} ---`
+  );
 
-    try {
-        const query = `
+  try {
+    const query = `
             SELECT 
                 a.id as agreement_id, 
                 a.status as agreement_status, 
@@ -608,13 +701,19 @@ exports.getActiveAgreementsForUser = async (req, res) => {
               AND a.status IN ('accepted', 'in_progress'); -- أو أي حالات تعتبرها "نشطة" للتنفيذ
         `;
 
-        const [agreements] = await pool.query(query, [userId]);
+    const [agreements] = await pool.query(query, [userId]);
 
-        console.log(`--- GetActiveAgreements: Found ${agreements.length} active agreements for User ID: ${userId} ---`);
-        res.status(200).json(agreements);
-
-    } catch (error) {
-        console.error(`--- GetActiveAgreements Error for User ID: ${userId} ---`, error);
-        res.status(500).json({ message: 'Server error while fetching active agreements' });
-    }
+    console.log(
+      `--- GetActiveAgreements: Found ${agreements.length} active agreements for User ID: ${userId} ---`
+    );
+    res.status(200).json(agreements);
+  } catch (error) {
+    console.error(
+      `--- GetActiveAgreements Error for User ID: ${userId} ---`,
+      error
+    );
+    res
+      .status(500)
+      .json({ message: "Server error while fetching active agreements" });
+  }
 };

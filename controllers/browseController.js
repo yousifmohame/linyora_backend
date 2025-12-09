@@ -9,7 +9,7 @@ const fetchFullProductData = async (productRows) => {
 
   const productIds = productRows.map((p) => p.id);
 
-  // 1. جلب بيانات المنتج الأساسية + التاجر + التقييمات
+  // 1. جلب بيانات المنتج الأساسية + التاجر + التقييمات + بيانات المورد (الجديد)
   const [products] = await pool.query(
     `
     SELECT 
@@ -21,10 +21,24 @@ const fetchFullProductData = async (productRows) => {
       p.created_at,
       u.store_name as merchantName,
       COALESCE(AVG(pr.rating), 0) as rating,
-      COUNT(DISTINCT pr.id) as reviewCount
+      COUNT(DISTINCT pr.id) as reviewCount,
+      
+      -- ✨ بيانات الدروبشيبينغ (الجديد)
+      MAX(sp.supplier_id) as supplier_id,
+      MAX(sup_u.name) as supplier_name,
+      (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
+
     FROM products p
     JOIN users u ON p.merchant_id = u.id
     LEFT JOIN product_reviews pr ON p.id = pr.product_id
+    
+    -- ✨ الربط مع جداول الدروبشيبينغ
+    LEFT JOIN product_variants pv ON p.id = pv.product_id
+    LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+    LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+    LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+    LEFT JOIN users sup_u ON sp.supplier_id = sup_u.id
+
     WHERE p.id IN (?)
     GROUP BY p.id
   `,
@@ -41,7 +55,6 @@ const fetchFullProductData = async (productRows) => {
   const variantsMap = new Map();
   variants.forEach((variant) => {
     try {
-      // تحويل نص الصور إلى مصفوفة
       variant.images = JSON.parse(variant.images || "[]");
     } catch (e) {
       variant.images = [];
@@ -54,16 +67,17 @@ const fetchFullProductData = async (productRows) => {
   // 4. دمج المنتجات مع الخيارات الخاصة بها
   const fullProducts = products.map((product) => ({
     ...product,
-    rating: parseFloat(product.rating), // تحويل التقييم إلى رقم
-    variants: variantsMap.get(product.id) || [], // إضافة مصفوفة الخيارات
+    rating: parseFloat(product.rating),
+    // تحويل القيمة المنطقية
+    is_dropshipping: !!product.is_dropshipping,
+    variants: variantsMap.get(product.id) || [],
   }));
 
-  // 5. إعادة ترتيب المنتجات بنفس الترتيب الأصلي (للحفاظ على 'الأحدث' أو 'الأكثر مبيعاً')
+  // 5. إعادة ترتيب المنتجات بنفس الترتيب الأصلي
   return productIds
     .map((id) => fullProducts.find((p) => p.id === id))
     .filter(Boolean);
 };
-// --- الدوال الموجودة لديك سابقاً ---
 
 // [GET] جلب قائمة بكل العارضات والمؤثرات مع بياناتهن الأساسية
 exports.getAllModels = async (req, res) => {
@@ -434,47 +448,6 @@ exports.getTopRated = asyncHandler(async (req, res) => {
   res.status(200).json(fullProducts);
 });
 
-exports.getTopModels = asyncHandler(async (req, res) => {
-  const limit = parseInt(req.query.limit) || 10;
-
-  // نفترض أن role_id = 3 هو للمودلز (أو المؤثرين)
-  // نقوم بحساب المتابعين من جدول user_follows والتقييم من agreement_reviews
-  const query = `
-    SELECT 
-      u.id, 
-      u.name, 
-      u.profile_picture_url, 
-      u.bio,
-      
-      -- 1. حساب عدد المتابعين الحقيقي
-      (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers,
-      
-      -- 2. حساب متوسط التقييم (من 5)
-      (SELECT COALESCE(AVG(rating), 0) FROM agreement_reviews WHERE reviewee_id = u.id) as rating,
-
-      -- 3. (اختياري) عدد الريلز
-      (SELECT COUNT(*) FROM reels WHERE user_id = u.id AND is_active = 1) as reels_count
-
-    FROM users u
-    WHERE u.role_id = 3 -- تأكد من رقم الدور الخاص بالمودلز في قاعدة بياناتك
-    AND u.is_banned = 0
-    ORDER BY followers DESC
-    LIMIT ?;
-  `;
-
-  const [models] = await pool.query(query, [limit]);
-
-  // تحويل الأرقام من String (SQL result) إلى Number
-  const formattedModels = models.map(model => ({
-    ...model,
-    followers: Number(model.followers),
-    rating: Number(model.rating) > 0 ? Number(model.rating).toFixed(1) : "5.0", // افتراضي 5 للجدد
-    reels_count: Number(model.reels_count)
-  }));
-
-  res.status(200).json(formattedModels);
-});
-
 // @desc    Get top merchants
 exports.getTopModels = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
@@ -490,7 +463,11 @@ exports.getTopModels = asyncHandler(async (req, res) => {
       (SELECT COALESCE(AVG(rating), 0) FROM agreement_reviews WHERE reviewee_id = u.id) as rating,
       
       -- ✅ هل أتابع هذا الشخص؟
-      ${currentUserId ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0` : 'FALSE'} as isFollowedByMe
+      ${
+        currentUserId
+          ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0`
+          : "FALSE"
+      } as isFollowedByMe
 
     FROM users u
     WHERE u.role_id = 3 
@@ -503,11 +480,11 @@ exports.getTopModels = asyncHandler(async (req, res) => {
   const params = currentUserId ? [currentUserId, limit] : [limit];
   const [models] = await pool.query(query, params);
 
-  const formattedModels = models.map(model => ({
+  const formattedModels = models.map((model) => ({
     ...model,
     followers: Number(model.followers),
     rating: Number(model.rating) > 0 ? Number(model.rating).toFixed(1) : "5.0",
-    isFollowedByMe: Boolean(model.isFollowedByMe) // ✅ تحويل لـ Boolean
+    isFollowedByMe: Boolean(model.isFollowedByMe), // ✅ تحويل لـ Boolean
   }));
 
   res.status(200).json(formattedModels);
@@ -535,7 +512,11 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
       ) as rating,
 
       -- ✅ هل أتابع هذا التاجر؟
-      ${currentUserId ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0` : 'FALSE'} as isFollowedByMe
+      ${
+        currentUserId
+          ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0`
+          : "FALSE"
+      } as isFollowedByMe
 
     FROM users u
     WHERE u.role_id = 2
@@ -547,11 +528,12 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
   const params = currentUserId ? [currentUserId, limit] : [limit];
   const [merchants] = await pool.query(query, params);
 
-  const formattedMerchants = merchants.map(merchant => ({
+  const formattedMerchants = merchants.map((merchant) => ({
     ...merchant,
     followers: Number(merchant.followers),
-    rating: Number(merchant.rating) > 0 ? Number(merchant.rating).toFixed(1) : "New",
-    isFollowedByMe: Boolean(merchant.isFollowedByMe) // ✅ تحويل لـ Boolean
+    rating:
+      Number(merchant.rating) > 0 ? Number(merchant.rating).toFixed(1) : "New",
+    isFollowedByMe: Boolean(merchant.isFollowedByMe), // ✅ تحويل لـ Boolean
   }));
 
   res.status(200).json(formattedMerchants);

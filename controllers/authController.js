@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const asyncHandler = require("express-async-handler");
 const crypto = require("crypto");
 const sendEmail = require("../utils/emailService");
+const templates = require("../utils/emailTemplates");
 
 // Helper function to generate a verification code
 const generateVerificationCode = () =>
@@ -82,8 +83,8 @@ exports.register = asyncHandler(async (req, res) => {
 
     await sendEmail({
       to: email,
-      subject: "Verify Your Email Address for Linora",
-      html: `<h1>Welcome to Linora!</h1><p>Your verification code is: <strong>${verificationCode}</strong></p><p>This code will expire in 10 minutes.</p>`,
+      subject: "تفعيل حسابك في لينيورا",
+      html: templates.authVerificationCode(verificationCode, "تفعيل الحساب الجديد"),
     });
 
     await connection.commit();
@@ -151,8 +152,8 @@ exports.login = asyncHandler(async (req, res) => {
   // 5. إرسال الكود عبر الإيميل
   await sendEmail({
     to: email,
-    subject: "Your Linora Login Verification Code",
-    html: `<h1>Login Verification</h1><p>Your login code is: <strong>${loginCode}</strong></p><p>This code will expire in 10 minutes.</p>`,
+    subject: "رمز الدخول - لينيورا",
+    html: templates.authVerificationCode(loginCode, "تسجيل الدخول"),
   });
 
   // 6. إرسال رسالة نجاح للواجهة الأمامية للانتقال للخطوة الثانية
@@ -252,10 +253,20 @@ exports.verifyEmail = asyncHandler(async (req, res) => {
     throw new Error("Invalid or expired verification code.");
   }
 
+  const [[userData]] = await pool.query("SELECT name FROM users WHERE id = ?", [user.id]);
+
   await pool.query(
     "UPDATE users SET is_email_verified = 1, email_verification_code = NULL, email_verification_expires = NULL WHERE id = ?",
     [user.id]
   );
+
+  if (userData) {
+      await sendEmail({
+          to: email,
+          subject: `أهلاً بك في لينيورا، ${userData.name}! 🚀`,
+          html: templates.welcomeEmail(userData.name)
+      }).catch(console.error);
+  }
 
   res
     .status(200)
@@ -292,8 +303,8 @@ exports.resendVerification = asyncHandler(async (req, res) => {
 
   await sendEmail({
     to: email,
-    subject: "Your New Linora Verification Code",
-    html: `<h1>Here is your new code</h1><p>Your new verification code is: <strong>${verificationCode}</strong></p><p>This code will expire in 10 minutes.</p>`,
+    subject: "رمز تفعيل جديد - لينيورا",
+    html: templates.authVerificationCode(verificationCode, "إعادة إرسال الرمز"),
   });
 
   res
@@ -344,19 +355,10 @@ exports.forgotPassword = async (req, res) => {
     // 5. إنشاء رابط إعادة التعيين وإرساله عبر البريد الإلكتروني
     const resetURL = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
-    const message = `
-            <div dir="rtl">
-                <h3>طلب إعادة تعيين كلمة المرور</h3>
-                <p>لقد طلبت إعادة تعيين كلمة المرور لحسابك. الرجاء الضغط على الرابط التالي لإكمال العملية. هذا الرابط صالح لمدة 10 دقائق فقط.</p>
-                <p><a href="${resetURL}" target="_blank">إعادة تعيين كلمة المرور</a></p>
-                <p>إذا لم تطلب هذا الإجراء، يمكنك تجاهل هذه الرسالة.</p>
-            </div>
-        `;
-
     await sendEmail({
       to: user.email,
-      subject: "إعادة تعيين كلمة المرور - منصة لينورا",
-      html: message,
+      subject: "إعادة تعيين كلمة المرور - منصة لينيورا",
+      html: templates.passwordResetRequest(resetURL),
     });
 
     res.status(200).json({

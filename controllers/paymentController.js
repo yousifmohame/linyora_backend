@@ -511,6 +511,45 @@ const createSetupIntent = asyncHandler(async (req, res) => {
   res.json({ clientSecret: setupIntent.client_secret });
 });
 
+const createPaymentIntent = async (req, res) => {
+  const stripe = getStripe();
+  try {
+    // 1. لاحظ أننا نستخدم req.user.id الذي يأتي من التوكن (Token)
+    // هذا يتطلب أن يكون المسار محمياً بـ authMiddleware
+    const userId = req.user.id; 
+    const { amount, currency = 'sar', payment_method_id, merchant_id } = req.body;
+
+    // 2. جلب stripe_customer_id من قاعدة البيانات مباشرة
+    const [[user]] = await pool.query("SELECT stripe_customer_id FROM users WHERE id = ?", [userId]);
+
+    if (!user || !user.stripe_customer_id) {
+      return res.status(400).json({ message: "No Stripe Customer ID found for this user." });
+    }
+
+    const customerId = user.stripe_customer_id;
+
+    // 3. إنشاء PaymentIntent مع تمرير customerId الصحيح
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency: currency,
+      customer: customerId, // ✅ الآن هذا الحقل مضمون الوجود
+      payment_method: payment_method_id,
+      confirm: false, 
+      metadata: {
+        merchant_id: merchant_id
+      }
+    });
+
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      id: paymentIntent.id
+    });
+  } catch (error) {
+    console.error("Stripe Intent Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 /**
  * @desc    Delete a payment method
  * @route   DELETE /api/payments/methods/:id
@@ -554,6 +593,7 @@ module.exports = {
   createAgreementCheckoutSession,
   getPaymentMethods,      // ✨ جديد
   createSetupIntent,      // ✨ جديد
+  createPaymentIntent,
   deletePaymentMethod,    // ✨ جديد
   setDefaultPaymentMethod // 
 };

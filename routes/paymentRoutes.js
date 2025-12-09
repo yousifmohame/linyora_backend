@@ -9,6 +9,7 @@ const {
   createAgreementCheckoutSession,
   getPaymentMethods,
   createSetupIntent,
+  createPaymentIntent,
   deletePaymentMethod,
   setDefaultPaymentMethod,
 } = require("../controllers/paymentController");
@@ -50,6 +51,7 @@ router.post("/webhook", handlePaymentWebhook);
 
 router.get("/methods", protect, getPaymentMethods);
 router.post("/setup-intent", protect, createSetupIntent);
+router.post("/create-intent", protect, createPaymentIntent);
 router.delete("/methods/:id", protect, deletePaymentMethod);
 router.put("/methods/:id/default", protect, setDefaultPaymentMethod);
 

@@ -79,6 +79,8 @@ exports.getCustomerOrderDetails = async (req, res) => {
                 o.tracking_number as trackingNumber,
                 o.payment_status as paymentStatus,
                 o.payment_method as paymentMethod,
+                o.shipping_cost,
+                o.tax_amount,
                 sc.name as shippingCompanyName,
                 addr.full_name as shippingFullName,
                 addr.address_line_1 as shippingAddress1,

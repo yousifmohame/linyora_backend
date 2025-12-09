@@ -1,6 +1,5 @@
 const pool = require("../config/db");
 const asyncHandler = require("express-async-handler");
-
 /**
  * @desc    Fetch all products with advanced filtering, sorting, and pagination.
  * @route   GET /api/products
@@ -8,37 +7,25 @@ const asyncHandler = require("express-async-handler");
  */
 exports.getAllProducts = asyncHandler(async (req, res) => {
   try {
-    const {
-      categoryId,
-      price_min,
-      price_max,
-      brands, // سيتم إرسالها كـ "brand1,brand2"
-      rating,
-      color,
-      sortBy, // e.g., 'price_asc', 'price_desc', 'latest'
-    } = req.query;
+    const { categoryId, price_min, price_max, brands, rating, color, sortBy } =
+      req.query;
 
     let queryParams = [];
     let productIdsInScope;
 
-    // --- بناء الجزء الأساسي من الاستعلام مع الفلاتر ---
-    // سنقوم بفلترة معرّفات المنتجات أولاً، ثم جلب تفاصيلها. هذا أكثر كفاءة.
+    // 1. فلترة الـ IDs أولاً (كما في الكود الأصلي)
     let filterQuery = `
             SELECT DISTINCT p.id 
             FROM products p
             LEFT JOIN product_categories pc ON p.id = pc.product_id
             LEFT JOIN product_variants pv ON p.id = pv.product_id
         `;
-
     const whereClauses = ["p.status = 'active'"];
 
-    // فلتر الفئة
     if (categoryId) {
       whereClauses.push(`pc.category_id = ?`);
       queryParams.push(categoryId);
     }
-
-    // فلتر السعر
     if (price_min) {
       whereClauses.push(`pv.price >= ?`);
       queryParams.push(price_min);
@@ -47,51 +34,52 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
       whereClauses.push(`pv.price <= ?`);
       queryParams.push(price_max);
     }
-
-    // فلتر الماركة (يدعم عدة ماركات)
     if (brands) {
-      const brandList = brands.split(",");
       whereClauses.push(`p.brand IN (?)`);
-      queryParams.push(brandList);
+      queryParams.push(brands.split(","));
     }
-
-    // فلتر اللون والحجم (من المتغيرات)
     if (color) {
       whereClauses.push(`pv.color = ?`);
       queryParams.push(color);
     }
 
-    if (whereClauses.length > 0) {
+    if (whereClauses.length > 0)
       filterQuery += ` WHERE ${whereClauses.join(" AND ")}`;
-    }
 
-    // تنفيذ استعلام الفلترة للحصول على IDs المنتجات
     const [productIdsResult] = await pool.query(filterQuery, queryParams);
     productIdsInScope = productIdsResult.map((p) => p.id);
 
-    if (productIdsInScope.length === 0) {
-      return res.status(200).json([]);
-    }
+    if (productIdsInScope.length === 0) return res.status(200).json([]);
 
-    // --- جلب بيانات المنتجات الكاملة بناءً على IDs المفلترة ---
+    // 2. جلب البيانات الكاملة (تم التعديل لإضافة بيانات المورد)
     let dataQuery = `
             SELECT 
-                p.id, p.name, p.description, p.brand, p.status,
+                p.id, p.name, p.description, p.brand, p.status, p.merchant_id,
                 u.store_name as merchantName,
                 (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
                 (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
-                (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as min_price
+                (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as min_price,
+                
+                -- ✨ بيانات الدروبشيبينغ
+                MAX(sp.supplier_id) as supplier_id,
+                MAX(sup_u.name) as supplier_name,
+                (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
+
             FROM products p
             JOIN users u ON p.merchant_id = u.id
+            -- ✨ الربط مع جداول الدروبشيبينغ
+            LEFT JOIN product_variants pv ON p.id = pv.product_id
+            LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+            LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+            LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+            LEFT JOIN users sup_u ON sp.supplier_id = sup_u.id
+
             WHERE p.id IN (?)
+            GROUP BY p.id
         `;
 
-    // فلتر التقييم (يطبق بعد جلب المنتجات)
-    if (rating) {
-      dataQuery += ` HAVING rating >= ?`;
-    }
+    if (rating) dataQuery += ` HAVING rating >= ?`;
 
-    // الترتيب
     switch (sortBy) {
       case "price_asc":
         dataQuery += " ORDER BY min_price ASC";
@@ -105,19 +93,17 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
         break;
     }
 
-    // إضافة `rating` إلى queryParams إذا كان موجودًا
     const finalQueryParams = [productIdsInScope];
-    if (rating) {
-      finalQueryParams.push(rating);
-    }
+    if (rating) finalQueryParams.push(rating);
 
     const [products] = await pool.query(dataQuery, finalQueryParams);
 
-    // جلب المتغيرات للمنتجات المفلترة
+    // جلب المتغيرات
     const [variants] = await pool.query(
       "SELECT * FROM product_variants WHERE product_id IN (?) AND stock_quantity > 0",
       [productIdsInScope]
     );
+
     const variantsMap = new Map();
     variants.forEach((variant) => {
       try {
@@ -130,9 +116,10 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
       variantsMap.set(variant.product_id, items);
     });
 
-    // دمج البيانات النهائية
     const productsWithData = products.map((product) => ({
       ...product,
+      // تأكد من تحويل القيم المنطقية بشكل صحيح
+      is_dropshipping: !!product.is_dropshipping,
       variants: variantsMap.get(product.id) || [],
       rating: parseFloat(product.rating) || 0,
       reviewCount: parseInt(product.reviewCount, 10) || 0,
@@ -194,19 +181,37 @@ exports.getAllProductsCompatible = async (req, res) => {
 };
 
 /**
- * [GET] Fetches a single product by its ID, along with all its variants.
+ * [GET] Fetches a single product by its ID.
  */
 exports.getProductById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // جلب المنتج الأساسي وبيانات التاجر
     const [productResult] = await pool.query(
       `
-            SELECT p.id, p.name, p.description, p.brand, u.store_name as merchantName
+            SELECT 
+                p.id, 
+                p.merchant_id, 
+                p.name, 
+                p.description, 
+                p.brand, 
+                u.store_name as merchantName,
+                
+                -- ✨ بيانات المورد باستخدام MAX لضمان عدم التكرار مع GROUP BY
+                MAX(sp.supplier_id) as supplier_id,
+                MAX(supplier_user.name) as supplier_name,
+                (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
             FROM products p
             JOIN users u ON p.merchant_id = u.id
-            WHERE p.id = ? AND p.status = 'active';
+            
+            LEFT JOIN product_variants pv ON p.id = pv.product_id
+            LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+            LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+            LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+            LEFT JOIN users supplier_user ON sp.supplier_id = supplier_user.id
+            
+            WHERE p.id = ? AND p.status = 'active'
+            GROUP BY p.id; 
         `,
       [id]
     );
@@ -216,7 +221,7 @@ exports.getProductById = async (req, res) => {
     }
     const product = productResult[0];
 
-    // جلب جميع متغيرات المنتج المتاحة
+    // جلب المتغيرات
     const [variants] = await pool.query(
       "SELECT * FROM product_variants WHERE product_id = ? AND stock_quantity > 0",
       [id]
@@ -227,26 +232,23 @@ exports.getProductById = async (req, res) => {
       images: typeof v.images === "string" ? JSON.parse(v.images) : [],
     }));
 
-    // ✨ جلب تقييمات المنتج مع أسماء المستخدمين
+    // جلب التقييمات
     let reviews = [];
     try {
       const [reviewsResult] = await pool.query(
-        `
-                SELECT r.id, r.rating, r.comment, r.created_at, u.name as userName
-                FROM product_reviews r
-                JOIN users u ON r.user_id = u.id
-                WHERE r.product_id = ?
-                ORDER BY r.created_at DESC
-            `,
+        `SELECT r.id, r.rating, r.comment, r.created_at, u.name as userName
+         FROM product_reviews r JOIN users u ON r.user_id = u.id
+         WHERE r.product_id = ? ORDER BY r.created_at DESC`,
         [id]
       );
       reviews = reviewsResult;
     } catch (e) {
-      console.log(
-        "Could not fetch reviews for product, table might not exist."
-      );
+      console.log("Could not fetch reviews.");
     }
     product.reviews = reviews;
+
+    // تحويل القيمة boolean
+    product.is_dropshipping = !!product.is_dropshipping;
 
     res.status(200).json(product);
   } catch (error) {
@@ -263,19 +265,19 @@ exports.getProductById = async (req, res) => {
 exports.getProductDetailsWithShipping = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  // ✅ FIX: The query is now more robust. It uses MAX() to ensure that if any
-  // variant of a product is a dropshipping item, the supplier_id is correctly identified.
+  // ✅ FIX: استخدام MAX(sp.supplier_id) لضمان جلب معرف المورد إذا كان المنتج دروبشيبينغ
   const [[product]] = await pool.query(
     `SELECT 
-            p.*, 
-            MAX(sp.supplier_id) AS supplier_id 
-         FROM products p
-         LEFT JOIN product_variants pv ON p.id = pv.product_id
-         LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
-         LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
-         LEFT JOIN supplier_products sp ON spv.product_id = sp.id
-         WHERE p.id = ? AND p.status = 'active'
-         GROUP BY p.id`,
+        p.*, 
+        MAX(sp.supplier_id) AS supplier_id,
+        (MAX(sp.supplier_id) IS NOT NULL) AS is_dropshipping 
+     FROM products p
+     LEFT JOIN product_variants pv ON p.id = pv.product_id
+     LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+     LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+     LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+     WHERE p.id = ? AND p.status = 'active'
+     GROUP BY p.id`,
     [id]
   );
 
@@ -288,8 +290,7 @@ exports.getProductDetailsWithShipping = asyncHandler(async (req, res) => {
     [id]
   );
 
-  // This logic is now reliable because the query is fixed.
-  // If it's a dropship item, ownerId will be the supplier's ID. Otherwise, the merchant's.
+  // تحديد المالك (الشاحن): إذا وجد supplier_id فهو المورد، وإلا فهو التاجر
   const ownerId = product.supplier_id || product.merchant_id;
 
   const [shippingCompanies] = await pool.query(
@@ -297,8 +298,13 @@ exports.getProductDetailsWithShipping = asyncHandler(async (req, res) => {
     [ownerId]
   );
 
+  // ✅ إرجاع البيانات بوضوح للفرونت إند
   res.status(200).json({
     ...product,
+    // تأكد من تحويل القيم لأنواعها الصحيحة
+    is_dropshipping: !!product.supplier_id,
+    supplier_id: product.supplier_id || null,
+
     variants: variants.map((v) => ({
       ...v,
       images: JSON.parse(v.images || "[]"),
@@ -309,20 +315,22 @@ exports.getProductDetailsWithShipping = asyncHandler(async (req, res) => {
 
 /**
  * @desc    Get consolidated shipping options for a list of products in a cart.
- * @route   POST /api/products/shipping-options-for-cart
- * @access  Private
  */
 exports.getShippingOptionsForCart = asyncHandler(async (req, res) => {
   const { productIds } = req.body;
+
+  console.log("🚀 [Shipping] Request received for Product IDs:", productIds);
 
   if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
     return res.status(400).json({ message: "Product IDs are required." });
   }
 
-  // ✅ FIX: This query also uses MAX() to be robust against product edits.
-  const [products] = await pool.query(
-    `SELECT 
+  try {
+    // 1. جلب بيانات المنتجات وتحديد المالك
+    const [products] = await pool.query(
+      `SELECT 
             p.id,
+            p.name,
             p.merchant_id,
             MAX(sp.supplier_id) AS supplier_id 
          FROM products p
@@ -332,35 +340,43 @@ exports.getShippingOptionsForCart = asyncHandler(async (req, res) => {
          LEFT JOIN supplier_products sp ON spv.product_id = sp.id
          WHERE p.id IN (?)
          GROUP BY p.id`,
-    [productIds]
-  );
+      [productIds]
+    );
 
-  const ownerIds = new Set();
-  products.forEach((p) => {
-    const owner = p.supplier_id || p.merchant_id;
-    if (owner) {
-      ownerIds.add(owner);
+    const ownerIds = new Set();
+
+    products.forEach((p) => {
+      // إذا وجد supplier_id فالمالك هو المورد، وإلا فالتاجر
+      const owner = p.supplier_id || p.merchant_id;
+      if (owner) ownerIds.add(owner);
+    });
+
+    if (ownerIds.size > 1) {
+      console.warn("⚠️ [Shipping] Mixed owners in one shipping group!");
+      return res.status(200).json([]);
     }
-  });
 
-  // Logic to ensure all cart items can be shipped from a single source
-  if (ownerIds.size > 1) {
-    return res.status(200).json([]);
+    if (ownerIds.size === 0) {
+      return res.status(404).json({ message: "Could not determine owner." });
+    }
+
+    const [singleOwnerId] = ownerIds;
+    console.log(
+      `🚚 [Shipping] Fetching shipping companies for Owner ID: ${singleOwnerId}`
+    );
+
+    // ✅ الاستعلام الصحيح (بدون typos وبدون estimated_days)
+    const query =
+      "SELECT id, name, shipping_cost FROM shipping_companies WHERE merchant_id = ? AND is_active = 1";
+
+    const [shippingCompanies] = await pool.query(query, [singleOwnerId]);
+
+    console.log(`✅ [Shipping] Found ${shippingCompanies.length} options.`);
+    res.status(200).json(shippingCompanies);
+  } catch (error) {
+    console.error("❌ [Shipping] Error:", error);
+    res.status(500).json({ message: "Server Error fetching shipping options" });
   }
-
-  if (ownerIds.size === 0) {
-    return res
-      .status(404)
-      .json({ message: "Could not determine a shipping owner." });
-  }
-
-  const [singleOwnerId] = ownerIds;
-  const [shippingCompanies] = await pool.query(
-    "SELECT id, name, shipping_cost FROM shipping_companies WHERE merchant_id = ? AND is_active = 1",
-    [singleOwnerId]
-  );
-
-  res.status(200).json(shippingCompanies);
 });
 
 /**
@@ -423,18 +439,18 @@ exports.getFilterOptions = asyncHandler(async (req, res) => {
  * @access  Public
  */
 exports.searchProducts = asyncHandler(async (req, res) => {
-    const { term } = req.query;
+  const { term } = req.query;
 
-    if (!term || term.trim() === '') {
-        return res.status(200).json([]);
-    }
+  if (!term || term.trim() === "") {
+    return res.status(200).json([]);
+  }
 
-    const searchTerm = `%${term}%`;
+  const searchTerm = `%${term}%`;
 
-    // This query searches the term in product name, brand, and description.
-    // It also fetches the price and image for the search results display.
-    const [products] = await pool.query(
-        `
+  // This query searches the term in product name, brand, and description.
+  // It also fetches the price and image for the search results display.
+  const [products] = await pool.query(
+    `
         SELECT
             p.id,
             p.name,
@@ -448,10 +464,46 @@ exports.searchProducts = asyncHandler(async (req, res) => {
         ORDER BY p.name ASC
         LIMIT 7
         `,
-        [searchTerm, searchTerm, searchTerm]
-    );
+    [searchTerm, searchTerm, searchTerm]
+  );
 
-    const validProducts = products.filter(p => p.price !== null && p.image_url !== null);
+  const validProducts = products.filter(
+    (p) => p.price !== null && p.image_url !== null
+  );
 
-    res.status(200).json(validProducts);
+  res.status(200).json(validProducts);
+});
+
+/**
+ * @desc    Get ALL products from merchants who have an accepted agreement with the model
+ * @route   GET /api/products/model-promotable
+ * @access  Private (Models only)
+ */
+exports.getModelPromotableProducts = asyncHandler(async (req, res) => {
+  const modelId = req.user.id;
+
+  // الاستعلام يقوم بالتالي:
+  // 1. يختار المنتجات (p)
+  // 2. يربطها بجدول الاتفاقيات (a) بناءً على معرف التاجر (merchant_id)
+  // 3. يفلتر النتائج بحيث يكون المودل هو الطرف الثاني والاتفاق "accepted"
+  // 4. DISTINCT تضمن عدم تكرار المنتجات في حال وجود أكثر من اتفاق مع نفس التاجر
+
+  const query = `
+    SELECT DISTINCT
+        p.id, 
+        p.name, 
+        p.merchant_id,
+        (SELECT price FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1) as price,
+        (SELECT JSON_UNQUOTE(JSON_EXTRACT(images, '$[0]')) FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1) as image_url
+    FROM products p
+    INNER JOIN agreements a ON p.merchant_id = a.merchant_id
+    WHERE a.model_id = ? 
+      AND a.status = 'in_progress'
+      AND p.status = 'active' -- تأكد أننا نجلب فقط المنتجات النشطة
+    ORDER BY p.created_at DESC
+  `;
+
+  const [products] = await pool.query(query, [modelId]);
+
+  res.status(200).json(products);
 });

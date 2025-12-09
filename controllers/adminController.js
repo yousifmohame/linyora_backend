@@ -3,6 +3,7 @@ const pool = require("../config/db");
 const sendEmail = require("../utils/emailService");
 const { getStripe } = require("../config/stripe");
 const asyncHandler = require("express-async-handler");
+const templates = require("../utils/emailTemplates");
 
 exports.getDashboardAnalytics = async (req, res) => {
   try {
@@ -139,73 +140,99 @@ exports.updateUser = async (req, res) => {
  * @access  Private (Admin)
  */
 exports.deleteUser = asyncHandler(async (req, res) => {
-    const userIdToDelete = req.params.id;
+  const userIdToDelete = req.params.id;
 
-    // لا تسمح للمشرف بحذف نفسه
-    if (req.user.id === parseInt(userIdToDelete, 10)) {
-        return res.status(400).json({ message: "لا يمكنك حذف حسابك الخاص." });
+  // لا تسمح للمشرف بحذف نفسه
+  if (req.user.id === parseInt(userIdToDelete, 10)) {
+    return res.status(400).json({ message: "لا يمكنك حذف حسابك الخاص." });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. التحقق من وجود المستخدم
+    const [[user]] = await connection.query(
+      "SELECT id FROM users WHERE id = ?",
+      [userIdToDelete]
+    );
+    if (!user) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ message: "المستخدم غير موجود." });
     }
 
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
+    // --- ✅ [FIX] حذف السجلات المرتبطة أولاً ---
+    // يجب إضافة حذف لجميع الجداول التي قد تحتوي على user_id كمفتاح أجنبي
 
-        // 1. التحقق من وجود المستخدم
-        const [[user]] = await connection.query("SELECT id FROM users WHERE id = ?", [userIdToDelete]);
-        if (!user) {
-            await connection.rollback();
-            connection.release();
-            return res.status(404).json({ message: "المستخدم غير موجود." });
-        }
+    // 2. حذف الاشتراكات المرتبطة
+    await connection.query("DELETE FROM user_subscriptions WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
-        // --- ✅ [FIX] حذف السجلات المرتبطة أولاً ---
-        // يجب إضافة حذف لجميع الجداول التي قد تحتوي على user_id كمفتاح أجنبي
+    // 3. حذف الإشعارات المرتبطة
+    await connection.query("DELETE FROM notifications WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
-        // 2. حذف الاشتراكات المرتبطة
-        await connection.query("DELETE FROM user_subscriptions WHERE user_id = ?", [userIdToDelete]);
+    // 4. حذف العناوين المرتبطة
+    await connection.query("DELETE FROM addresses WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
-        // 3. حذف الإشعارات المرتبطة
-        await connection.query("DELETE FROM notifications WHERE user_id = ?", [userIdToDelete]);
+    // 5. حذف سجلات المحفظة والمعاملات (هام!)
+    await connection.query(
+      "DELETE FROM wallet_transactions WHERE user_id = ?",
+      [userIdToDelete]
+    );
+    // 6. حذف السجلات الخاصة بأدوار المستخدم (تاجر، مودل، مورد)
+    //    (افترض أن هذه الجداول تحتوي على user_id)
+    //    !! يجب إضافة حذف للمنتجات والمتغيرات إذا كان المستخدم تاجرًا !!
+    //    !! يجب إضافة حذف للعروض والباقات إذا كان المستخدم مودل !!
+    //    !! يجب إضافة حذف لمنتجات المورد إذا كان موردًا !!
+    //    مثال (قد تحتاج لتعديله حسب هيكل جداولك):
+    await connection.query("DELETE FROM products WHERE merchant_id = ?", [
+      userIdToDelete,
+    ]); // Requires handling variants, etc. first
+    await connection.query("DELETE FROM service_packages WHERE user_id = ?", [
+      userIdToDelete,
+    ]); // Requires handling tiers first
+    await connection.query(
+      "DELETE FROM supplier_products WHERE supplier_id = ?",
+      [userIdToDelete]
+    ); // Requires handling variants first
 
-        // 4. حذف العناوين المرتبطة
-        await connection.query("DELETE FROM addresses WHERE user_id = ?", [userIdToDelete]);
+    // --- [هام جدًا] ---
+    // عملية حذف المنتجات/العروض تتطلب منطقًا مشابهًا لما فعلناه سابقًا (حذف الاعتماديات أولاً).
+    // قد يكون من الأفضل عدم حذف هذه البيانات مباشرة، بل وضع علامة "محذوف" على المستخدم
+    // أو نقل البيانات لأرشيف بدلاً من حذفها نهائيًا للحفاظ على سجلات المبيعات/الاتفاقيات السابقة.
+    // الحل الحالي يحذف فقط البيانات الأساسية للمستخدم.
 
-        // 5. حذف سجلات المحفظة والمعاملات (هام!)
-        await connection.query("DELETE FROM wallet_transactions WHERE user_id = ?", [userIdToDelete]);
-        // 6. حذف السجلات الخاصة بأدوار المستخدم (تاجر، مودل، مورد)
-        //    (افترض أن هذه الجداول تحتوي على user_id)
-        //    !! يجب إضافة حذف للمنتجات والمتغيرات إذا كان المستخدم تاجرًا !!
-        //    !! يجب إضافة حذف للعروض والباقات إذا كان المستخدم مودل !!
-        //    !! يجب إضافة حذف لمنتجات المورد إذا كان موردًا !!
-        //    مثال (قد تحتاج لتعديله حسب هيكل جداولك):
-        await connection.query("DELETE FROM products WHERE merchant_id = ?", [userIdToDelete]); // Requires handling variants, etc. first
-        await connection.query("DELETE FROM service_packages WHERE user_id = ?", [userIdToDelete]); // Requires handling tiers first
-        await connection.query("DELETE FROM supplier_products WHERE supplier_id = ?", [userIdToDelete]); // Requires handling variants first
+    // 7. حذف المستخدم الرئيسي
+    await connection.query("DELETE FROM users WHERE id = ?", [userIdToDelete]);
 
-        // --- [هام جدًا] ---
-        // عملية حذف المنتجات/العروض تتطلب منطقًا مشابهًا لما فعلناه سابقًا (حذف الاعتماديات أولاً).
-        // قد يكون من الأفضل عدم حذف هذه البيانات مباشرة، بل وضع علامة "محذوف" على المستخدم
-        // أو نقل البيانات لأرشيف بدلاً من حذفها نهائيًا للحفاظ على سجلات المبيعات/الاتفاقيات السابقة.
-        // الحل الحالي يحذف فقط البيانات الأساسية للمستخدم.
-
-        // 7. حذف المستخدم الرئيسي
-        await connection.query("DELETE FROM users WHERE id = ?", [userIdToDelete]);
-
-        // 8. إكمال المعاملة
-        await connection.commit();
-        res.status(200).json({ message: "تم حذف المستخدم بنجاح." });
-
-    } catch (error) {
-        await connection.rollback();
-        console.error("Error deleting user:", error);
-        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
-             res.status(400).json({ message: "لا يمكن حذف المستخدم لوجود بيانات مرتبطة به لم يتم حذفها (مثل المنتجات أو الطلبات النشطة)." , details: error.sqlMessage});
-        } else {
-             res.status(500).json({ message: "حدث خطأ غير متوقع أثناء حذف المستخدم." });
-        }
-    } finally {
-        connection.release();
+    // 8. إكمال المعاملة
+    await connection.commit();
+    res.status(200).json({ message: "تم حذف المستخدم بنجاح." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error deleting user:", error);
+    if (error.code === "ER_ROW_IS_REFERENCED_2") {
+      res
+        .status(400)
+        .json({
+          message:
+            "لا يمكن حذف المستخدم لوجود بيانات مرتبطة به لم يتم حذفها (مثل المنتجات أو الطلبات النشطة).",
+          details: error.sqlMessage,
+        });
+    } else {
+      res
+        .status(500)
+        .json({ message: "حدث خطأ غير متوقع أثناء حذف المستخدم." });
     }
+  } finally {
+    connection.release();
+  }
 });
 
 exports.getAllAgreements = async (req, res) => {
@@ -365,10 +392,10 @@ exports.updateShippingCompany = async (req, res) => {
 
 // [GET] جلب جميع الاشتراكات في المنصة
 exports.getAllSubscriptions = asyncHandler(async (req, res) => {
-    try {
-        // تم تصحيح اسم الجدول إلى 'user_subscriptions'
-        // وتم إضافة JOIN مع 'subscription_plans' لجلب اسم وسعر الباقة بشكل ديناميكي
-        const [subscriptions] = await pool.query(`
+  try {
+    // تم تصحيح اسم الجدول إلى 'user_subscriptions'
+    // وتم إضافة JOIN مع 'subscription_plans' لجلب اسم وسعر الباقة بشكل ديناميكي
+    const [subscriptions] = await pool.query(`
             SELECT 
                 us.id, 
                 us.status, 
@@ -384,12 +411,11 @@ exports.getAllSubscriptions = asyncHandler(async (req, res) => {
             ORDER BY us.start_date DESC
         `);
 
-        res.status(200).json(subscriptions);
-
-    } catch (error) {
-        console.error("Error fetching all subscriptions:", error);
-        res.status(500).json({ message: "فشل في جلب الاشتراكات." });
-    }
+    res.status(200).json(subscriptions);
+  } catch (error) {
+    console.error("Error fetching all subscriptions:", error);
+    res.status(500).json({ message: "فشل في جلب الاشتراكات." });
+  }
 });
 
 exports.getAllPlatformProducts = async (req, res) => {
@@ -488,12 +514,10 @@ exports.getOrderDetails = async (req, res) => {
       0
     );
 
-    res
-      .status(200)
-      .json({
-        details: { ...orderDetails[0], totalAmount },
-        items: orderItems,
-      });
+    res.status(200).json({
+      details: { ...orderDetails[0], totalAmount },
+      items: orderItems,
+    });
   } catch (error) {
     console.error("Error fetching order details for admin:", error);
     res.status(500).json({ message: "خطأ في جلب تفاصيل الطلب." });
@@ -533,7 +557,7 @@ exports.updateAgreementStatus = async (req, res) => {
     }
 
     const [agreementDetails] = await connection.query(
-            `
+      `
             SELECT 
                 a.merchant_id, a.model_id, a.stripe_payment_intent_id,
                 m.email as merchant_email, mo.email as model_email, 
@@ -545,21 +569,24 @@ exports.updateAgreementStatus = async (req, res) => {
             JOIN offers o ON a.offer_id = o.id
             WHERE a.id = ?
             `,
-            [id]
-        );
+      [id]
+    );
 
     // --- ✨ منطق العمولة والمحفظة يبدأ هنا ---
     // --- ✨ منطق سحب المبلغ والمحفظة يبدأ هنا ---
     if (status === "completed" && agreementDetails.length > 0) {
-        const { model_id, offer_price, stripe_payment_intent_id } = agreementDetails[0];
+      const { model_id, offer_price, stripe_payment_intent_id } =
+        agreementDetails[0];
 
-        // الآن هذا السطر سيعمل بنجاح لأن stripe_payment_intent_id موجود
-        if (!stripe_payment_intent_id) {
-            throw new Error('Stripe payment intent ID not found for this agreement.');
-        }
+      // الآن هذا السطر سيعمل بنجاح لأن stripe_payment_intent_id موجود
+      if (!stripe_payment_intent_id) {
+        throw new Error(
+          "Stripe payment intent ID not found for this agreement."
+        );
+      }
 
-        const stripe = getStripe();
-        await stripe.paymentIntents.capture(stripe_payment_intent_id);
+      const stripe = getStripe();
+      await stripe.paymentIntents.capture(stripe_payment_intent_id);
 
       // 2. حساب العمولة وصافي الربح (نفس المنطق السابق)
       const [settings] = await connection.query(
@@ -585,7 +612,6 @@ exports.updateAgreementStatus = async (req, res) => {
         [netEarnings, model_id]
       );
     }
-    
 
     // إرسال الإشعارات والإيميلات (لا تغيير هنا)
     if (agreementDetails.length > 0) {
@@ -666,12 +692,9 @@ exports.cancelUserSubscription = async (req, res) => {
       [id]
     );
 
-    res
-      .status(200)
-      .json({
-        message:
-          "Subscription has been set to cancel at the end of the period.",
-      });
+    res.status(200).json({
+      message: "Subscription has been set to cancel at the end of the period.",
+    });
   } catch (error) {
     console.error("Admin: Error cancelling subscription:", error);
     res.status(500).json({ message: "Failed to cancel subscription." });
@@ -774,7 +797,9 @@ exports.getVerificationDetails = async (req, res) => {
 
     // ✨ التأكد من أن البيانات هي كائنات JSON وليست نصوص
     const userProfile = user[0];
-    userProfile.social_links = userProfile.social_links ? JSON.parse(userProfile.social_links) : {};
+    userProfile.social_links = userProfile.social_links
+      ? JSON.parse(userProfile.social_links)
+      : {};
     userProfile.stats = userProfile.stats ? JSON.parse(userProfile.stats) : {};
 
     res.json({ user: userProfile, bank: bank[0] || {} });
@@ -803,25 +828,27 @@ exports.reviewVerification = async (req, res) => {
     );
 
     // --- Send Email Notification ---
-    const [user] = await pool.query(
-      "SELECT email, name FROM users WHERE id = ?",
-      [id]
-    );
+    const [user] = await pool.query("SELECT email, name FROM users WHERE id = ?", [id]);
+    
     if (user.length > 0) {
       const { email, name } = user[0];
-      if (status === "approved") {
-        await sendEmail({
-          to: email,
-          subject: "Congratulations! Your Linora Merchant Account is Approved",
-          html: `<h3>Hello ${name},</h3><p>We are pleased to inform you that your merchant account on Linora has been approved! You can now start selling your products.</p>`,
-        });
-      } else {
-        await sendEmail({
-          to: email,
-          subject: "Update on Your Linora Merchant Account Verification",
-          html: `<h3>Hello ${name},</h3><p>We have reviewed your verification submission and unfortunately, it could not be approved at this time for the following reason:</p><p><strong>${rejection_reason}</strong></p><p>Please correct the issue and resubmit your information from your dashboard.</p>`,
-        });
-      }
+      
+      // 1. إشعار داخل الموقع
+      const message = status === 'approved' 
+        ? "تهانينا! تمت الموافقة على توثيق حسابك." 
+        : "عذراً، تم رفض طلب التوثيق. يرجى مراجعة البريد الإلكتروني للتفاصيل.";
+        
+      await pool.query(
+        "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+        [id, "VERIFICATION", status === 'approved' ? 'check' : 'x', message, "/dashboard/settings"]
+      );
+
+      // 2. إرسال الإيميل بالقالب الجديد
+      await sendEmail({
+        to: email,
+        subject: status === "approved" ? "مبروك! تم توثيق حسابك في لينيورا" : "تحديث بخصوص طلب التوثيق",
+        html: templates.verificationResult(name, status, rejection_reason),
+      });
     }
 
     res.json({ message: `Merchant has been ${status}.` });
@@ -926,6 +953,24 @@ exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
     );
 
     await connection.commit();
+
+    // --- 🔔 الإشعارات ---
+    if (requestInfo) {
+        // 1. إشعار الموقع
+        const message = `تم ${status === 'approved' ? 'الموافقة على' : 'رفض'} طلب السحب رقم #${id}.`;
+        await pool.query(
+            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+            [requestInfo.user_id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/wallet"]
+        );
+
+        // 2. إيميل
+        sendEmail({
+            to: requestInfo.email,
+            subject: `تحديث حالة طلب السحب #${id}`,
+            html: templates.payoutStatusUpdate(requestInfo.name, requestInfo.amount, status, notes)
+        }).catch(console.error);
+    }
+
     res.json({ message: `Request for ${user_type} has been ${status}.` });
 
     // (Optional: Send email notification to user)
@@ -995,7 +1040,6 @@ exports.getSubscriptionPlans = asyncHandler(async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: "Server error while fetching plans." });
   }
-
 });
 
 /**
@@ -1004,7 +1048,6 @@ exports.getSubscriptionPlans = asyncHandler(async (req, res) => {
  * @access  Admin
  */
 exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
-
   try {
     const {
       role,
@@ -1013,6 +1056,7 @@ exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
       price,
       features,
       includes_dropshipping,
+      allows_promotion_in_stories, // 🔥 استقبال الحقل الجديد
       is_active,
     } = req.body;
 
@@ -1023,11 +1067,13 @@ exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
       price,
       JSON.stringify(features || []),
       includes_dropshipping || false,
+      allows_promotion_in_stories || false, // 🔥 إضافته للقيم (افتراضي false)
       is_active,
     ];
 
+    // 🔥 تحديث جملة SQL لإضافة العمود الجديد
     const [result] = await pool.query(
-      "INSERT INTO subscription_plans (role, name, description, price, features, includes_dropshipping, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO subscription_plans (role, name, description, price, features, includes_dropshipping, allows_promotion_in_stories, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       valuesToInsert
     );
 
@@ -1035,9 +1081,9 @@ exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
       .status(201)
       .json({ message: "تم إنشاء الباقة بنجاح", id: result.insertId });
   } catch (error) {
+    console.error("Create Plan Error:", error);
     res.status(500).json({ message: "Server error while creating the plan." });
   }
-
 });
 
 /**
@@ -1046,7 +1092,6 @@ exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
  * @access  Admin
  */
 exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
-
   try {
     const { id } = req.params;
     const {
@@ -1055,6 +1100,7 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
       price,
       features,
       includes_dropshipping,
+      allows_promotion_in_stories, // 🔥 استقبال الحقل الجديد
       is_active,
     } = req.body;
 
@@ -1064,24 +1110,26 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
       price,
       JSON.stringify(features || []),
       includes_dropshipping || false,
+      allows_promotion_in_stories || false, // 🔥 إضافته للقيم
       is_active,
       id,
     ];
 
+    // 🔥 تحديث جملة SQL لتعديل العمود الجديد
     const [result] = await pool.query(
-      "UPDATE subscription_plans SET name = ?, description = ?, price = ?, features = ?, includes_dropshipping = ?, is_active = ? WHERE id = ?",
+      "UPDATE subscription_plans SET name = ?, description = ?, price = ?, features = ?, includes_dropshipping = ?, allows_promotion_in_stories = ?, is_active = ? WHERE id = ?",
       valuesToUpdate
     );
-    
+
     if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Plan not found." });
+      return res.status(404).json({ message: "Plan not found." });
     }
 
     res.json({ message: "تم تحديث الباقة بنجاح" });
   } catch (error) {
+    console.error("Update Plan Error:", error);
     res.status(500).json({ message: "Server error while updating the plan." });
   }
-  console.log("======================================================");
 });
 
 /**
@@ -1110,7 +1158,7 @@ exports.getAllModelPayouts = async (req, res) => {
       -- WHERE mpr.status = 'pending'
       ORDER BY mpr.created_at DESC
     `);
-    
+
     res.json(requests);
   } catch (error) {
     console.error("Error fetching all model payout requests:", error);
@@ -1145,10 +1193,10 @@ exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
       await connection.rollback();
       return res.status(404).json({ message: "Payout request not found." });
     }
-    
-    if (payout.status !== 'pending') {
-        await connection.rollback();
-        return res.status(400).json({ message: "Request already processed." });
+
+    if (payout.status !== "pending") {
+      await connection.rollback();
+      return res.status(400).json({ message: "Request already processed." });
     }
 
     // 1. تحديث الطلب
@@ -1158,7 +1206,7 @@ exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
     );
 
     // 2. إذا تم الرفض، أعد المال إلى wallet_transactions
-    if (status === 'rejected') {
+    if (status === "rejected") {
       const [txs] = await connection.query(
         "SELECT * FROM wallet_transactions WHERE id = ?",
         [payout.wallet_transaction_id] // هذا هو العمود الذي أضفناه
@@ -1182,6 +1230,23 @@ exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
     // 3. إذا تمت الموافقة، لا نفعل شيئاً
 
     await connection.commit();
+
+    // --- 🔔 الإشعارات ---
+    if (payout) {
+        const message = `تم ${status === 'approved' ? 'الموافقة على' : 'رفض'} طلب السحب رقم #${id}.`;
+        
+        await pool.query(
+            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+            [payout.user_id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/models/wallet"]
+        );
+
+        sendEmail({
+            to: payout.email,
+            subject: `تحديث حالة طلب السحب #${id}`,
+            html: templates.payoutStatusUpdate(payout.name, payout.amount, status, notes)
+        }).catch(console.error);
+    }
+    
     res.json({ message: `Payout ${status}.` });
   } catch (error) {
     await connection.rollback();
@@ -1192,21 +1257,20 @@ exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
   }
 });
 
-
 /**
  * @desc    Admin: Get details for a single model payout request
  * @route   GET /api/admin/model-payouts/:id
  * @access  Private (Admin)
  */
 exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    
-    try {
-        // قمنا بعمل JOIN مع users لجلب اسم الموديل
-        // و LEFT JOIN مع merchant_bank_details لجلب بيانات البنك
-        // (نفترض أن الموديل تستخدم نفس جدول التجار للبيانات البنكية)
-        const [details] = await pool.query(
-            `SELECT 
+  const { id } = req.params;
+
+  try {
+    // قمنا بعمل JOIN مع users لجلب اسم الموديل
+    // و LEFT JOIN مع merchant_bank_details لجلب بيانات البنك
+    // (نفترض أن الموديل تستخدم نفس جدول التجار للبيانات البنكية)
+    const [details] = await pool.query(
+      `SELECT 
                 mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
                 u.name as userName, u.email as userEmail, u.phone_number,
                 mbd.account_number, mbd.iban, mbd.iban_certificate_url, mbd.bank_name 
@@ -1214,68 +1278,100 @@ exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
              JOIN users u ON mpr.user_id = u.id
              LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
              WHERE mpr.id = ?`,
-            [id]
-        );
+      [id]
+    );
 
-        if (details.length === 0) {
-            return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
-        }
-
-        res.json(details[0]);
-    } catch (error) {
-        console.error("Error fetching model payout request details:", error);
-        res.status(500).json({ message: "Server error" });
+    if (details.length === 0) {
+      return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
     }
+
+    res.json(details[0]);
+  } catch (error) {
+    console.error("Error fetching model payout request details:", error);
+    res.status(500).json({ message: "Server error" });
+  }
 });
-
-
 
 // [GET] جلب جميع باقات الترويج
 exports.getAllPromotionTiers = asyncHandler(async (req, res) => {
-    const [tiers] = await pool.query("SELECT id, name, duration_days, price, is_active FROM promotion_tiers ORDER BY created_at DESC");
-    const formattedTiers = tiers.map(t => ({...t, is_active: !!t.is_active})); // تحويل 0/1 إلى boolean
-    res.status(200).json(formattedTiers);
+  const [tiers] = await pool.query(
+    "SELECT id, name, duration_days, price, is_active FROM promotion_tiers ORDER BY created_at DESC"
+  );
+  const formattedTiers = tiers.map((t) => ({ ...t, is_active: !!t.is_active })); // تحويل 0/1 إلى boolean
+  res.status(200).json(formattedTiers);
 });
 
 // [POST] إنشاء باقة ترويج جديدة
 exports.createPromotionTier = asyncHandler(async (req, res) => {
-    // ✨ Added priority and badge_color
-    const { name, duration_days, price, priority, badge_color } = req.body;
-    const [result] = await pool.query(
-        "INSERT INTO promotion_tiers (name, duration_days, price, priority, badge_color) VALUES (?, ?, ?, ?, ?)",
-        [name, duration_days, price, priority || 0, badge_color || '#cccccc']
-    );
-    res.status(201).json({ id: result.insertId, name, duration_days, price, priority, badge_color, is_active: true });
+  // ✨ Added priority and badge_color
+  const { name, duration_days, price, priority, badge_color } = req.body;
+  const [result] = await pool.query(
+    "INSERT INTO promotion_tiers (name, duration_days, price, priority, badge_color) VALUES (?, ?, ?, ?, ?)",
+    [name, duration_days, price, priority || 0, badge_color || "#cccccc"]
+  );
+  res
+    .status(201)
+    .json({
+      id: result.insertId,
+      name,
+      duration_days,
+      price,
+      priority,
+      badge_color,
+      is_active: true,
+    });
 });
 
 // [PUT] تحديث باقة ترويج
 exports.updatePromotionTier = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    // ✨ Added priority and badge_color
-    const { name, duration_days, price, is_active, priority, badge_color } = req.body;
-    
-    const fields = [];
-    const values = [];
-    if (name !== undefined) { fields.push("name = ?"); values.push(name); }
-    if (duration_days !== undefined) { fields.push("duration_days = ?"); values.push(duration_days); }
-    if (price !== undefined) { fields.push("price = ?"); values.push(price); }
-    if (is_active !== undefined) { fields.push("is_active = ?"); values.push(is_active); }
-    // ✨ Add new fields to the update query
-    if (priority !== undefined) { fields.push("priority = ?"); values.push(priority); }
-    if (badge_color !== undefined) { fields.push("badge_color = ?"); values.push(badge_color); }
+  const { id } = req.params;
+  // ✨ Added priority and badge_color
+  const { name, duration_days, price, is_active, priority, badge_color } =
+    req.body;
 
-    if (fields.length === 0) {
-        return res.status(400).json({ message: "No data to update." });
-    }
+  const fields = [];
+  const values = [];
+  if (name !== undefined) {
+    fields.push("name = ?");
+    values.push(name);
+  }
+  if (duration_days !== undefined) {
+    fields.push("duration_days = ?");
+    values.push(duration_days);
+  }
+  if (price !== undefined) {
+    fields.push("price = ?");
+    values.push(price);
+  }
+  if (is_active !== undefined) {
+    fields.push("is_active = ?");
+    values.push(is_active);
+  }
+  // ✨ Add new fields to the update query
+  if (priority !== undefined) {
+    fields.push("priority = ?");
+    values.push(priority);
+  }
+  if (badge_color !== undefined) {
+    fields.push("badge_color = ?");
+    values.push(badge_color);
+  }
 
-    values.push(id);
-    await pool.query(`UPDATE promotion_tiers SET ${fields.join(", ")} WHERE id = ?`, values);
-    res.status(200).json({ message: "تم تحديث الباقة بنجاح." });
+  if (fields.length === 0) {
+    return res.status(400).json({ message: "No data to update." });
+  }
+
+  values.push(id);
+  await pool.query(
+    `UPDATE promotion_tiers SET ${fields.join(", ")} WHERE id = ?`,
+    values
+  );
+  res.status(200).json({ message: "تم تحديث الباقة بنجاح." });
 });
 
 // [GET] جلب جميع طلبات الترويج المعلقة
 exports.getPromotionRequests = asyncHandler(async (req, res) => {
-    const query = `
+  const query = `
         SELECT
             pp.id, pp.status, pp.created_at,
             p.name as productName, u.name as merchantName,
@@ -1287,43 +1383,44 @@ exports.getPromotionRequests = asyncHandler(async (req, res) => {
         WHERE pp.status = 'pending_approval'
         ORDER BY pp.created_at ASC
     `;
-    const [requests] = await pool.query(query);
-    res.status(200).json(requests);
+  const [requests] = await pool.query(query);
+  res.status(200).json(requests);
 });
 
 // [PUT] الموافقة على طلب ترويج وتفعيله
 exports.approvePromotionRequest = asyncHandler(async (req, res) => {
-    const { id: promotionId } = req.params;
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
+  const { id: promotionId } = req.params;
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
 
-        const [[request]] = await connection.query(
-            `SELECT pp.*, pt.duration_days FROM product_promotions pp 
+    const [[request]] = await connection.query(
+      `SELECT pp.*, pt.duration_days FROM product_promotions pp 
              JOIN promotion_tiers pt ON pp.promotion_tier_id = pt.id 
              WHERE pp.id = ? AND pp.status = 'pending_approval'`,
-            [promotionId]
-        );
+      [promotionId]
+    );
 
-        if (!request) {
-            throw new Error("الطلب غير موجود أو تمت معالجته مسبقًا.");
-        }
-
-        await connection.query(
-            "UPDATE product_promotions SET status = 'active', start_date = NOW(), end_date = NOW() + INTERVAL ? DAY WHERE id = ?",
-            [request.duration_days, promotionId]
-        );
-
-        await connection.commit();
-        res.status(200).json({ message: "تمت الموافقة على الطلب وتفعيله بنجاح." });
-    } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ message: error.message || "فشل في الموافقة على الطلب." });
-    } finally {
-        connection.release();
+    if (!request) {
+      throw new Error("الطلب غير موجود أو تمت معالجته مسبقًا.");
     }
-});
 
+    await connection.query(
+      "UPDATE product_promotions SET status = 'active', start_date = NOW(), end_date = NOW() + INTERVAL ? DAY WHERE id = ?",
+      [request.duration_days, promotionId]
+    );
+
+    await connection.commit();
+    res.status(200).json({ message: "تمت الموافقة على الطلب وتفعيله بنجاح." });
+  } catch (error) {
+    await connection.rollback();
+    res
+      .status(500)
+      .json({ message: error.message || "فشل في الموافقة على الطلب." });
+  } finally {
+    connection.release();
+  }
+});
 
 /**
  * @desc    Admin: Get all products from all merchants
@@ -1331,8 +1428,8 @@ exports.approvePromotionRequest = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  */
 exports.getAllProducts = asyncHandler(async (req, res) => {
-    // استعلام معقد لجلب كل البيانات المطلوبة بكفاءة
-    const query = `
+  // استعلام معقد لجلب كل البيانات المطلوبة بكفاءة
+  const query = `
         SELECT 
         p.id, p.name, p.brand, p.status, p.created_at AS createdAt,
         u.name AS merchantName,
@@ -1362,8 +1459,8 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
         JOIN users u ON p.merchant_id = u.id
         ORDER BY p.created_at DESC;
     `;
-    const [products] = await pool.query(query);
-    res.status(200).json(products);
+  const [products] = await pool.query(query);
+  res.status(200).json(products);
 });
 
 /**
@@ -1372,20 +1469,23 @@ exports.getAllProducts = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  */
 exports.updateProductStatusByAdmin = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { status } = req.body;
+  const { id } = req.params;
+  const { status } = req.body;
 
-    if (!['active', 'draft', 'archived'].includes(status)) {
-        return res.status(400).json({ message: "حالة غير صالحة." });
-    }
+  if (!["active", "draft", "archived"].includes(status)) {
+    return res.status(400).json({ message: "حالة غير صالحة." });
+  }
 
-    const [result] = await pool.query("UPDATE products SET status = ? WHERE id = ?", [status, id]);
+  const [result] = await pool.query(
+    "UPDATE products SET status = ? WHERE id = ?",
+    [status, id]
+  );
 
-    if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "المنتج غير موجود." });
-    }
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ message: "المنتج غير موجود." });
+  }
 
-    res.status(200).json({ message: "تم تحديث حالة المنتج بنجاح." });
+  res.status(200).json({ message: "تم تحديث حالة المنتج بنجاح." });
 });
 
 /**
@@ -1394,35 +1494,45 @@ exports.updateProductStatusByAdmin = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  */
 exports.deleteProductByAdmin = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    
-    // استخدام transaction لضمان الحذف الآمن
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
+  const { id } = req.params;
 
-        // حذف السجلات المرتبطة (احترازي)
-        await connection.query("DELETE FROM product_categories WHERE product_id = ?", [id]);
-        await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [id]);
-        await connection.query("DELETE FROM product_promotions WHERE product_id = ?", [id]);
-        
-        // حذف المنتج نفسه (سيؤدي إلى حذف المتغيرات المرتبطة تلقائياً بسبب ON DELETE CASCADE)
-        const [result] = await connection.query("DELETE FROM products WHERE id = ?", [id]);
-        
-        if (result.affectedRows === 0) {
-            throw new Error("المنتج غير موجود.");
-        }
+  // استخدام transaction لضمان الحذف الآمن
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
 
-        await connection.commit();
-        res.status(200).json({ message: "تم حذف المنتج بنجاح." });
-    } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ message: error.message || "فشل في حذف المنتج." });
-    } finally {
-        connection.release();
+    // حذف السجلات المرتبطة (احترازي)
+    await connection.query(
+      "DELETE FROM product_categories WHERE product_id = ?",
+      [id]
+    );
+    await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [
+      id,
+    ]);
+    await connection.query(
+      "DELETE FROM product_promotions WHERE product_id = ?",
+      [id]
+    );
+
+    // حذف المنتج نفسه (سيؤدي إلى حذف المتغيرات المرتبطة تلقائياً بسبب ON DELETE CASCADE)
+    const [result] = await connection.query(
+      "DELETE FROM products WHERE id = ?",
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      throw new Error("المنتج غير موجود.");
     }
-});
 
+    await connection.commit();
+    res.status(200).json({ message: "تم حذف المنتج بنجاح." });
+  } catch (error) {
+    await connection.rollback();
+    res.status(500).json({ message: error.message || "فشل في حذف المنتج." });
+  } finally {
+    connection.release();
+  }
+});
 
 /**
  * @desc    Admin: Get all conversations on the platform
@@ -1460,7 +1570,7 @@ exports.adminGetAllConversations = asyncHandler(async (req, res) => {
  */
 exports.adminGetMessagesForConversation = asyncHandler(async (req, res) => {
   const { conversationId } = req.params;
-  
+
   // لا نحتاج للتحقق من هوية المستخدم، الأدمن يمكنه رؤية كل شيء
   const query = `
     SELECT 

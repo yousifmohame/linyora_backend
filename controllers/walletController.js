@@ -1,5 +1,7 @@
 // backend/controllers/walletController.js
 const pool = require("../config/db");
+const sendEmail = require("../utils/emailService");
+const templates = require("../utils/emailTemplates");
 
 /**
  * @desc    Get comprehensive wallet data for the current merchant
@@ -122,6 +124,7 @@ exports.getWalletTransactions = async (req, res) => {
  */
 exports.requestPayout = async (req, res) => {
   const merchantId = req.user.id;
+  const merchantName = req.user.name;
   const { amount } = req.body;
 
   const numericAmount = Number(amount);
@@ -187,6 +190,22 @@ exports.requestPayout = async (req, res) => {
     );
 
     await connection.commit();
+
+    const adminEmail = process.env.ADMIN_EMAIL || "me8999109@gmail.com";
+
+    // ملاحظة: نحتاج اسم التاجر، إذا لم يكن في req.user، يجب جلبه
+    let name = req.user.name;
+    if (!name) {
+        const [[user]] = await pool.query("SELECT name FROM users WHERE id = ?", [merchantId]);
+        name = user?.name || "Merchant";
+    }
+
+    sendEmail({
+        to: adminEmail,
+        subject: `طلب سحب جديد من ${name}`,
+        html: templates.payoutRequestAdmin(name, "Merchant", numericAmount, "New") // مرر الـ ID إذا توفر
+    }).catch(console.error);
+
     res.status(201).json({ message: "تم إرسال طلب السحب بنجاح." });
   } catch (error) {
     await connection.rollback();
@@ -339,6 +358,22 @@ exports.requestModelPayout = async (req, res) => {
     );
 
     await connection.commit();
+
+    const adminEmail = process.env.ADMIN_EMAIL || "me8999109@gmail.com";
+    
+    // ملاحظة: نحتاج اسم التاجر، إذا لم يكن في req.user، يجب جلبه
+    let name = req.user.name;
+    if (!name) {
+        const [[user]] = await pool.query("SELECT name FROM users WHERE id = ?", [merchantId]);
+        name = user?.name || "Merchant";
+    }
+
+    sendEmail({
+        to: process.env.ADMIN_EMAIL,
+        subject: `طلب سحب جديد من ${req.user.name}`,
+        html: templates.payoutRequestAdmin(req.user.name, "Model", numericAmount, result.insertId)
+    }).catch(console.error);
+
     res.status(201).json({ message: "تم إرسال طلب السحب بنجاح." });
   } catch (error) {
     await connection.rollback();

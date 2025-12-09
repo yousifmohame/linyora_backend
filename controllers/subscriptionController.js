@@ -106,9 +106,10 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
  * @access  Private
  */
 exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
-  console.log(`🔎 [GET /api/subscriptions/status] Checking active subscription for user: ${req.user.id}`);
+  console.log(
+    `🔎 [GET /api/subscriptions/status] Checking active subscription for user: ${req.user.id}`
+  );
 
-  // This query is designed to find ONLY the single, currently active subscription.
   const query = `
     SELECT 
         s.id,
@@ -119,7 +120,8 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
         sp.description AS plan_description,
         sp.price AS plan_price,
         sp.features AS plan_features,
-        sp.includes_dropshipping
+        sp.includes_dropshipping,
+        sp.allows_promotion_in_stories -- ✨ 1. جلب الحقل الجديد
     FROM user_subscriptions s
     JOIN subscription_plans sp ON s.plan_id = sp.id
     WHERE s.user_id = ?
@@ -133,12 +135,11 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
 
   if (subscriptions.length > 0) {
     const activeSub = subscriptions[0];
-    console.log("✅ Active subscription found:", activeSub.plan_name);
-    
-    // Parse features from JSON string to an array for the frontend
-    const features = typeof activeSub.plan_features === 'string' 
-      ? JSON.parse(activeSub.plan_features) 
-      : [];
+
+    const features =
+      typeof activeSub.plan_features === "string"
+        ? JSON.parse(activeSub.plan_features)
+        : [];
 
     res.status(200).json({
       status: "active",
@@ -147,25 +148,26 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
         description: activeSub.plan_description,
         price: activeSub.plan_price,
         features: features,
+        allows_promotion_in_stories: !!activeSub.allows_promotion_in_stories, // ✨ 2. إرجاع القيمة ضمن كائن الخطة
       },
       permissions: {
         hasDropshippingAccess: !!activeSub.includes_dropshipping,
+        canPromoteStories: !!activeSub.allows_promotion_in_stories, // ✨ خيار إضافي للوضوح
       },
       startDate: activeSub.start_date,
       endDate: activeSub.end_date,
     });
   } else {
-    console.log(`⚠️ No active subscriptions found for user: ${req.user.id}`);
     res.status(200).json({
       status: "inactive",
       plan: null,
       permissions: {
         hasDropshippingAccess: false,
+        canPromoteStories: false,
       },
     });
   }
 });
-
 
 /**
  * @desc    Get all subscriptions for the current user (history)
@@ -173,7 +175,9 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
  * @access  Private
  */
 exports.getSubscriptionHistory = asyncHandler(async (req, res) => {
-  console.log(`📜 [GET /api/subscriptions/history] Fetching history for user ID: ${req.user.id}`);
+  console.log(
+    `📜 [GET /api/subscriptions/history] Fetching history for user ID: ${req.user.id}`
+  );
 
   const [subscriptions] = await pool.query(
     `SELECT 
@@ -194,16 +198,14 @@ exports.getSubscriptionHistory = asyncHandler(async (req, res) => {
   res.json(subscriptions);
 });
 
-
-
 /**
  * @desc    Get all subscriptions for the current user (history)
  * @route   GET /api/subscriptions/history
  * @access  Private
  */
 exports.getAllUserSubscriptions = asyncHandler(async (req, res) => {
-    const [subscriptions] = await pool.query(
-        `SELECT 
+  const [subscriptions] = await pool.query(
+    `SELECT 
             s.id,
             s.status,
             s.start_date,
@@ -214,8 +216,8 @@ exports.getAllUserSubscriptions = asyncHandler(async (req, res) => {
          JOIN subscription_plans sp ON s.plan_id = sp.id
          WHERE s.user_id = ?
          ORDER BY s.start_date DESC`,
-        [req.user.id]
-    );
+    [req.user.id]
+  );
 
-    res.json(subscriptions);
+  res.json(subscriptions);
 });

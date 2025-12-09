@@ -19,7 +19,7 @@ const sendEmail = async ({ to, subject, html }) => {
   const resend = getResend();
   try {
     const { data, error } = await resend.emails.send({
-      from: 'Linora <linyora@linyora.com>', // يجب أن يكون هذا النطاق معتمدًا في حسابك بـ Resend
+      from: 'Linyora <linyora@linyora.com>', // يجب أن يكون هذا النطاق معتمدًا في حسابك بـ Resend
       to: to, // Resend يتوقع مصفوفة من الإيميلات
       subject,
       html,

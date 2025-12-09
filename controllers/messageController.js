@@ -1,6 +1,7 @@
 // backend/controllers/messageController.js
 const pool = require('../config/db');
 const sendEmail = require('../utils/emailService');
+const templates = require("../utils/emailTemplates");
 
 // [GET] جلب جميع محادثات المستخدم
 exports.getConversations = async (req, res) => {
@@ -128,11 +129,26 @@ exports.sendMessage = async (req, res) => {
         if (receiverSocketId) {
             io.to(receiverSocketId).emit('newMessage', newMessage);
         } else {
-            await sendEmail({
-                to: receiver.email,
-                subject: `لديك رسالة جديدة من ${sender.name}`,
-                html: `<p>لقد استلمت رسالة جديدة.</p><p><b>الرسالة:</b> ${body || 'مرفق'}</p><a href="${process.env.FRONTEND_URL}/dashboard/messages?active=${conversationId}">عرض المحادثة</a>`
-            });
+            try {
+                const [users] = await pool.query("SELECT email, name FROM users WHERE id IN (?, ?)", [senderId, receiverId]);
+                const sender = users.find(u => u.id === senderId); // انتبه: الـ query لا تعيد ID افتراضياً إذا لم تطلبه، تأكد من الـ SELECT
+                // الأفضل جلب البيانات بشكل صريح:
+                const [[senderData]] = await pool.query("SELECT name FROM users WHERE id = ?", [senderId]);
+                const [[receiverData]] = await pool.query("SELECT name, email FROM users WHERE id = ?", [receiverId]);
+
+                if (receiverData && senderData) {
+                    // نرسل جزء من الرسالة كمعاينة (أول 50 حرف)
+                    const preview = body ? (body.length > 50 ? body.substring(0, 50) + "..." : body) : "ملف مرفق";
+
+                    sendEmail({
+                        to: receiverData.email,
+                        subject: `رسالة جديدة من ${senderData.name}`,
+                        html: templates.newMessageNotification(receiverData.name, senderData.name, preview)
+                    }).catch(console.error);
+                }
+            } catch (mailError) {
+                console.error("Failed to send offline message email:", mailError);
+            }
         }
 
         res.status(201).json({ message: 'Message sent successfully.', data: newMessage });

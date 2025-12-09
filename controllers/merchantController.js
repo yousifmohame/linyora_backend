@@ -537,9 +537,14 @@ exports.getOrderDetails = async (req, res) => {
   const merchantId = req.user.id;
 
   try {
-    // فحص أمني: التأكد من أن هذا الطلب يحتوي على منتج واحد على الأقل يخص التاجر
+    // 1. فحص أمني: التأكد من أن هذا الطلب يحتوي على منتج واحد على الأقل يخص التاجر
     const [authCheck] = await pool.query(
-      `SELECT o.id FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE o.id = ? AND p.merchant_id = ? LIMIT 1`,
+      `SELECT o.id 
+       FROM orders o 
+       JOIN order_items oi ON o.id = oi.order_id 
+       JOIN products p ON oi.product_id = p.id 
+       WHERE o.id = ? AND p.merchant_id = ? 
+       LIMIT 1`,
       [orderId, merchantId]
     );
 
@@ -549,19 +554,43 @@ exports.getOrderDetails = async (req, res) => {
         .json({ message: "لا تملك صلاحية الوصول لهذا الطلب" });
     }
 
-    // جلب تفاصيل الطلب الكاملة
+    // 2. جلب تفاصيل الطلب العامة (العميل، الحالة، إلخ)
+    // قمت بإضافة payment_status و payment_method هنا لدعم التحديثات السابقة
     const [orderDetails] = await pool.query(
-      `SELECT o.id, o.status, o.created_at, u.name as customerName, u.email as customerEmail FROM orders o JOIN users u ON o.customer_id = u.id WHERE o.id = ?`,
+      `SELECT 
+          o.id, o.status, o.created_at, o.total_amount, 
+          o.payment_status, o.payment_method, o.shipping_address_id,
+          u.name as customerName, u.email as customerEmail, u.phone_number as customerPhone,
+          CONCAT(a.address_line_1, ', ', a.city, ', ', a.country) as shippingAddress
+       FROM orders o 
+       JOIN users u ON o.customer_id = u.id 
+       LEFT JOIN addresses a ON o.shipping_address_id = a.id
+       WHERE o.id = ?`,
       [orderId]
     );
 
+    // 3. ✨ [التصحيح هنا] جلب المنتجات الخاصة بهذا التاجر فقط داخل هذا الطلب
     const [orderItems] = await pool.query(
-      `SELECT p.name, oi.quantity, oi.price FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?`,
-      [orderId]
+      `SELECT p.name, p.id as productId, oi.quantity, oi.price, 
+              (SELECT JSON_UNQUOTE(JSON_EXTRACT(images, '$[0]')) FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1) as image
+       FROM order_items oi 
+       JOIN products p ON oi.product_id = p.id 
+       WHERE oi.order_id = ? AND p.merchant_id = ?`, // 👈 تم إضافة شرط التاجر هنا
+      [orderId, merchantId]
     );
+
+    // 4. (اختياري) إعادة حساب إجمالي المبلغ بناءً على منتجات التاجر فقط للعرض
+    // لأن o.total_amount يحتوي على إجمالي الطلب لكل التجار
+    const merchantTotalAmount = orderItems.reduce((acc, item) => acc + (Number(item.price) * item.quantity), 0);
+    
+    // نحدث الإجمالي في التفاصيل ليعكس حصة التاجر فقط
+    if (orderDetails[0]) {
+        orderDetails[0].totalAmount = merchantTotalAmount;
+    }
 
     res.status(200).json({ details: orderDetails[0], items: orderItems });
   } catch (error) {
+    console.error("Error fetching order details:", error);
     res.status(500).json({ message: "خطأ في جلب تفاصيل الطلب" });
   }
 };
