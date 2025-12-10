@@ -4,6 +4,7 @@ const sendEmail = require("../utils/emailService");
 const { getStripe } = require("../config/stripe");
 const asyncHandler = require("express-async-handler");
 const templates = require("../utils/emailTemplates");
+const bcrypt = require('bcryptjs'); // 👈 أضف هذا السطر
 
 exports.getDashboardAnalytics = async (req, res) => {
   try {
@@ -1584,4 +1585,100 @@ exports.adminGetMessagesForConversation = asyncHandler(async (req, res) => {
   `;
   const [messages] = await pool.query(query, [conversationId]);
   res.json(messages);
+});
+
+// @desc    Create a new Sub-Admin
+// @route   POST /api/admin/sub-admins
+exports.createSubAdmin = asyncHandler(async (req, res) => {
+  const { name, email, password, permissions } = req.body;
+
+  // التحقق من وجود المستخدم
+  const userExists = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
+  if (userExists[0].length > 0) {
+    res.status(400);
+    throw new Error("المستخدم موجود بالفعل");
+  }
+
+  // تشفير كلمة المرور
+  const salt = await bcrypt.genSalt(10);
+  const hashedPassword = await bcrypt.hash(password, salt);
+
+  // البحث عن معرف دور الـ Admin (لنفترض أنه رقم 1 أو قم بجلبه)
+  // يفضل جلب role_id الخاص بـ 'admin' من جدول roles
+  const [roleResult] = await pool.query("SELECT id FROM roles WHERE name = 'Admin' OR name = 'admin' LIMIT 1");
+  const adminRoleId = roleResult[0]?.id || 1; 
+
+  // إنشاء المستخدم مع الصلاحيات
+  await pool.query(
+    `INSERT INTO users (name, email, password, role_id, is_super_admin, permissions, verification_status, is_email_verified	) 
+     VALUES (?, ?, ?, ?, FALSE, ?, 'approved', '1')`,
+    [name, email, hashedPassword, adminRoleId, JSON.stringify(permissions)]
+  );
+
+  res.status(201).json({ message: "تم إنشاء الأدمن الفرعي بنجاح" });
+});
+
+// @desc    Get all Sub-Admins
+// @route   GET /api/admin/sub-admins
+exports.getSubAdmins = asyncHandler(async (req, res) => {
+  const [admins] = await pool.query(
+    "SELECT id, name, email, permissions FROM users WHERE role_id = '1' AND is_super_admin = FALSE"
+  );
+  
+  // تحويل permissions من نص إلى JSON إذا لزم الأمر (بعض مكتبات MySQL تفعلها تلقائياً)
+  const formattedAdmins = admins.map(admin => ({
+    ...admin,
+    permissions: typeof admin.permissions === 'string' ? JSON.parse(admin.permissions) : admin.permissions
+  }));
+
+  res.json(formattedAdmins);
+});
+
+// @desc    Update Sub-Admin Permissions
+// @route   PUT /api/admin/sub-admins/:id
+exports.updateSubAdmin = asyncHandler(async (req, res) => {
+  const { permissions } = req.body;
+  const { id } = req.params;
+
+  await pool.query(
+    "UPDATE users SET permissions = ? WHERE id = ? AND is_super_admin = FALSE",
+    [JSON.stringify(permissions), id]
+  );
+
+  res.json({ message: "تم تحديث الصلاحيات بنجاح" });
+});
+
+/**
+ * @desc    Admin: Update order status
+ * @route   PUT /api/admin/orders/:id/status
+ * @access  Private/Admin
+ */
+exports.updateOrderStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  // قائمة الحالات المسموح بها (تأكد أنها تطابق قاعدة بياناتك)
+  const validStatuses = ['pending', 'processing', 'shipped', 'delivered', 'completed', 'cancelled'];
+
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({ message: "حالة الطلب غير صالحة." });
+  }
+
+  try {
+    const [result] = await pool.query(
+      "UPDATE orders SET status = ? WHERE id = ?",
+      [status, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "الطلب غير موجود." });
+    }
+
+    // (اختياري) إرسال إشعار للعميل بتغيير الحالة هنا
+
+    res.status(200).json({ message: "تم تحديث حالة الطلب بنجاح." });
+  } catch (error) {
+    console.error("Error updating order status:", error);
+    res.status(500).json({ message: "فشل تحديث حالة الطلب." });
+  }
 });

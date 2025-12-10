@@ -226,7 +226,7 @@ const calculateAndRecordEarnings = async (orderId, connection) => {
 };
 /**
  * @private
- * @desc    الدالة الجوهرية لإنشاء الطلبات (مع إشعارات كاملة وتقسيم الطلبات)
+ * @desc    الدالة الجوهرية لإنشاء الطلبات (مع فصل طلبات الدروبشيبينغ عن طلبات التاجر)
  */
 exports.createOrderInternal = async (orderPayload) => {
   const {
@@ -251,39 +251,71 @@ exports.createOrderInternal = async (orderPayload) => {
       [customerId]
     );
 
-    // 1. تجميع المنتجات حسب التاجر
-    const productIds = cartItems.map((item) => item.productId);
-    const [productsInfo] = await connection.query(
-      `SELECT id, merchant_id FROM products WHERE id IN (?)`,
-      [productIds]
+    // 1. جلب تفاصيل المنتجات والموردين (التعديل الجوهري هنا)
+    // نحتاج لمعرفة هل المنتج (Variant) مرتبط بمورد أم لا لفصله
+    const variantIds = cartItems.map((item) => item.id); // بافتراض أن item.id هو Variant ID
+
+    const [variantsInfo] = await connection.query(
+      `SELECT 
+          pv.id as variant_id, 
+          p.merchant_id, 
+          sp.supplier_id 
+       FROM product_variants pv
+       JOIN products p ON pv.product_id = p.id
+       LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+       LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+       LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+       WHERE pv.id IN (?)`,
+      [variantIds]
     );
-    const productMerchantMap = {};
-    productsInfo.forEach((p) => {
-      productMerchantMap[p.id] = p.merchant_id;
+
+    // إنشاء خريطة لبيانات كل منتج
+    const variantDetailsMap = {};
+    variantsInfo.forEach((v) => {
+      variantDetailsMap[v.variant_id] = {
+        merchant_id: v.merchant_id,
+        supplier_id: v.supplier_id || null, // إذا كان null فهو منتج تاجر عادي
+      };
     });
 
-    const ordersByMerchant = new Map();
+    // 2. تجميع المنتجات (فصل الدروبشيبينغ عن العادي)
+    const ordersMap = new Map();
+
     for (const item of cartItems) {
-      const merchantId = productMerchantMap[item.productId];
-      if (!merchantId) throw new Error(`Product ${item.productId} not found.`);
-      if (!ordersByMerchant.has(merchantId))
-        ordersByMerchant.set(merchantId, { items: [], merchantTotal: 0 });
-      const group = ordersByMerchant.get(merchantId);
+      const details = variantDetailsMap[item.id];
+      if (!details) throw new Error(`Product Variant ${item.id} not found.`);
+
+      // المفتاح الفريد للتجميع: دمج معرف التاجر مع معرف المورد
+      // إذا كان المنتج عادي: Key = "123_null"
+      // إذا كان دروبشيبينغ: Key = "123_456" (حيث 456 هو المورد)
+      const groupKey = `${details.merchant_id}_${details.supplier_id}`;
+
+      if (!ordersMap.has(groupKey)) {
+        ordersMap.set(groupKey, {
+          merchantId: details.merchant_id,
+          supplierId: details.supplier_id, // نحتفظ به لنعرف نوع الطلب
+          items: [],
+          merchantTotal: 0,
+        });
+      }
+
+      const group = ordersMap.get(groupKey);
       group.items.push(item);
       group.merchantTotal += Number(item.price) * item.quantity;
     }
 
-    // 2. إنشاء الطلبات
-    for (const [merchantId, group] of ordersByMerchant.entries()) {
+    // 3. إنشاء الطلبات بناءً على المجموعات المفصولة
+    for (const [groupKey, group] of ordersMap.entries()) {
       let shippingCost = 0;
       let shippingCompanyId = null;
 
+      // حساب الشحن (يتم تطبيقه على كل طلب منفصل)
       if (
         merchant_shipping_selections &&
         Array.isArray(merchant_shipping_selections)
       ) {
         const selection = merchant_shipping_selections.find(
-          (s) => String(s.merchant_id) === String(merchantId)
+          (s) => String(s.merchant_id) === String(group.merchantId)
         );
         if (selection) {
           const [[company]] = await connection.query(
@@ -299,6 +331,7 @@ exports.createOrderInternal = async (orderPayload) => {
 
       const orderTotal = group.merchantTotal + shippingCost;
 
+      // إدراج الطلب في قاعدة البيانات
       const [orderResult] = await connection.query(
         `INSERT INTO orders (customer_id, status, payment_status, payment_method, total_amount, shipping_address_id, shipping_company_id, shipping_cost, stripe_session_id) 
          VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
@@ -317,7 +350,7 @@ exports.createOrderInternal = async (orderPayload) => {
       const orderId = orderResult.insertId;
       createdOrderIds.push(orderId);
 
-      // معالجة العناصر والحصول على قائمة الموردين لإشعارهم
+      // معالجة العناصر
       const suppliersToNotify = await processOrderItems(
         orderId,
         group.items,
@@ -327,24 +360,37 @@ exports.createOrderInternal = async (orderPayload) => {
       // حساب الأرباح
       await calculateAndRecordEarnings(orderId, connection);
 
-      // --- تحضير الإشعارات ---
+      // --- إرسال الإشعارات ---
 
-      // أ) إشعار التاجر
+      // أ) إشعار التاجر (يصل للتاجر إشعار بوجود طلب)
       const [[merchant]] = await connection.query(
         "SELECT email, name FROM users WHERE id = ?",
-        [merchantId]
+        [group.merchantId]
       );
+
       if (merchant) {
+        // تحديد نوع الرسالة للتاجر
+        // إذا كان الطلب للمورد (group.supplierId موجود)، نرسل له تنبيه "مبيعة دروبشيبينغ" وليس "طلب جديد للشحن"
+        const notificationType = group.supplierId
+          ? "DROPSHIP_SALE"
+          : "NEW_ORDER";
+        const notificationMsg = group.supplierId
+          ? `تم بيع منتج دروبشيبينغ (طلب #${orderId})`
+          : `طلب جديد للشحن رقم #${orderId}`;
+
         await connection.query(
           "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
           [
-            merchantId,
-            "NEW_ORDER",
+            group.merchantId,
+            notificationType,
             "bell",
-            `طلب جديد رقم #${orderId}`,
+            notificationMsg,
             `/dashboard/orders/${orderId}`,
           ]
         );
+
+        // إرسال الإيميل للتاجر
+        // يمكنك هنا تخصيص قالب مختلف إذا كان الطلب دروبشيبينغ ليعلم التاجر أنه ليس عليه شحنه
         emailsToSend.push({
           to: merchant.email,
           subject: `طلب جديد #${orderId} - لينورا`,
@@ -356,7 +402,7 @@ exports.createOrderInternal = async (orderPayload) => {
         });
       }
 
-      // ب) إشعارات الموردين (جديد ✨)
+      // ب) إشعارات الموردين (يصل فقط إذا كان الطلب يحتوي على منتجاتهم)
       for (const [supplierId, data] of suppliersToNotify.entries()) {
         await connection.query(
           "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
@@ -375,7 +421,7 @@ exports.createOrderInternal = async (orderPayload) => {
         });
       }
 
-      // ج) إشعار العميل
+      // ج) إشعار العميل (يصل لكل طلب منفصل ليعرف التقسيم)
       if (customer) {
         emailsToSend.push({
           to: customer.email,
@@ -394,7 +440,10 @@ exports.createOrderInternal = async (orderPayload) => {
     Promise.allSettled(emailsToSend.map((email) => sendEmail(email))).catch(
       console.error
     );
-    return createdOrderIds[0];
+
+    // إرجاع مصفوفة المعرفات بدلاً من معرف واحد
+    // ملاحظة: قد تحتاج لتعديل الـ Frontend ليتعامل مع مصفوفة إذا كنت تستخدمها في التوجيه
+    return createdOrderIds;
   } catch (error) {
     await connection.rollback();
     console.error("Internal order creation failed:", error);
@@ -403,7 +452,6 @@ exports.createOrderInternal = async (orderPayload) => {
     connection.release();
   }
 };
-
 
 /**
  * @desc    إنشاء طلب جديد للدفع عند الاستلام (COD)
@@ -549,12 +597,10 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
     // إذا كنت تريد منع التاجر من تحديث حالة طلبات الدروبشيبينغ:
     if (isDropshipOrder && !isUserSupplier) {
       await connection.rollback();
-      return res
-        .status(403)
-        .json({
-          message:
-            "لا يمكن للتاجر تحديث حالة طلب دروبشيبينغ. يجب على المورد القيام بذلك.",
-        });
+      return res.status(403).json({
+        message:
+          "لا يمكن للتاجر تحديث حالة طلب دروبشيبينغ. يجب على المورد القيام بذلك.",
+      });
     }
 
     // 2. تحديث الحالة

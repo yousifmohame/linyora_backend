@@ -183,6 +183,9 @@ exports.getAllProductsCompatible = async (req, res) => {
 /**
  * [GET] Fetches a single product by its ID.
  */
+/**
+ * [GET] Fetches a single product by its ID.
+ */
 exports.getProductById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -197,13 +200,20 @@ exports.getProductById = async (req, res) => {
                 p.brand, 
                 u.store_name as merchantName,
                 
-                -- ✨ بيانات المورد باستخدام MAX لضمان عدم التكرار مع GROUP BY
+                -- ✨ (جديد) جلب معرف التصنيف 
+                -- نستخدم MAX لجلب قيمة واحدة في حال كان المنتج يتبع لأكثر من تصنيف
+                MAX(pc.category_id) as category_id,
+
+                -- ✨ بيانات المورد 
                 MAX(sp.supplier_id) as supplier_id,
                 MAX(supplier_user.name) as supplier_name,
                 (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
             FROM products p
             JOIN users u ON p.merchant_id = u.id
             
+            -- ✨ (جديد) الانضمام لجدول التصنيفات
+            LEFT JOIN product_categories pc ON p.id = pc.product_id
+
             LEFT JOIN product_variants pv ON p.id = pv.product_id
             LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
             LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
