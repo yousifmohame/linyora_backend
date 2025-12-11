@@ -48,7 +48,7 @@ const wrapTemplate = (title, body) => {
   return `
     <div style="${baseStyle}" dir="rtl">
       <div style="${headerStyle}">
-        <h1 style="margin:0; font-size: 24px;">Linora | لينيورا</h1>
+        <h1 style="margin:0; font-size: 24px;">Linyora | لينيورا</h1>
       </div>
       <div style="${contentStyle}">
         <h2 style="color: #8b5cf6; margin-top: 0;">${title}</h2>

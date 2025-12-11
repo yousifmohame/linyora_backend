@@ -220,7 +220,7 @@ exports.updateAgreementStatus = async (req, res) => {
 
       await sendEmail({
         to: merchant_email,
-        subject: `تحديث بخصوص طلب التعاون على منصة لينورا`,
+        subject: `تحديث بخصوص طلب التعاون على منصة لينيورا`,
         html: `<div dir="rtl"><h3>تحديث حالة طلب التعاون</h3><p>${notificationMessage}</p><p><a href="${process.env.FRONTEND_URL}/dashboard/agreements">اضغط هنا لمراجعة طلباتك</a></p></div>`,
       });
     }

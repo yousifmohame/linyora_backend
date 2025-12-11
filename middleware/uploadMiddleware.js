@@ -10,22 +10,16 @@ const storage = new CloudinaryStorage({
   params: async (req, file) => {
     console.log(`--- MW: Processing file: ${file.originalname} | Field: ${file.fieldname} | Type: ${file.mimetype} ---`);
     
-    let folder = 'linora_platform/other';
-    let resource_type = 'auto'; // دع Cloudinary يقرر النوع مبدئياً
-    let allowed_formats = ['jpg', 'png', 'jpeg', 'pdf', 'webp']; // الصيغ الافتراضية
-
-    // 1. التحقق مما إذا كان الملف فيديو (سواء من اسم الحقل أو نوع الملف)
+    // 1. تحديد هل الملف فيديو أم لا
     const isVideo = file.fieldname === 'video' || file.mimetype.startsWith('video/');
 
-    if (isVideo) {
-        folder = 'linora_platform/reels'; // مجلد الفيديوهات الافتراضي
-        resource_type = 'video';
-        allowed_formats = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
-    } 
-    
-    // 2. تخصيص المجلدات بناءً على اسم الحقل
+    let folder = 'linora_platform/other';
+    let resource_type = 'auto'; 
+    let allowed_formats = ['jpg', 'png', 'jpeg', 'pdf', 'webp'];
+
+    // 2. منطق التوجيه للمجلدات وتحديد النوع
     if (file.fieldname === 'media') {
-        // هذا خاص بالقصص (Stories) حيث يمكن أن يكون فيديو أو صورة
+        // خاص بالقصص (Stories)
         folder = 'linora_platform/stories';
         if (isVideo) {
             resource_type = 'video';
@@ -35,12 +29,23 @@ const storage = new CloudinaryStorage({
             allowed_formats = ['jpg', 'png', 'jpeg', 'webp'];
         }
     } else if (['image', 'images', 'profile_picture', 'store_logo_url', 'store_banner_url'].includes(file.fieldname)) {
-        folder = 'linora_platform/images';
-        resource_type = 'image';
-        allowed_formats = ['jpg', 'png', 'jpeg', 'webp'];
+        // ✨ التعديل هنا: التحقق إذا كان "image" في الحقيقة فيديو (مثل البانرات)
+        if (isVideo) {
+            folder = 'linora_platform/banners_video'; // مجلد خاص لفيديوهات البانر
+            resource_type = 'video';
+            allowed_formats = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
+        } else {
+            folder = 'linora_platform/images';
+            resource_type = 'image';
+            allowed_formats = ['jpg', 'png', 'jpeg', 'webp'];
+        }
+    } else if (isVideo) {
+        // أي فيديو آخر لم يتم تحديد حقل له
+        folder = 'linora_platform/reels';
+        resource_type = 'video';
+        allowed_formats = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
     } else if (['identity_image_url', 'iban_certificate_url', 'identity_document_url', 'business_license_url'].includes(file.fieldname)) {
         folder = 'linora_platform/documents';
-        // المستندات قد تكون صور أو PDF
         allowed_formats = ['jpg', 'png', 'jpeg', 'pdf'];
     }
 
@@ -50,7 +55,8 @@ const storage = new CloudinaryStorage({
       folder: folder,
       resource_type: resource_type,
       allowed_formats: allowed_formats,
-      public_id: `${Date.now()}-${file.originalname.split('.')[0].replace(/[^a-zA-Z0-9]/g, "_")}` // تنظيف الاسم
+      // الحفاظ على الاسم الأصلي أو إنشاء اسم فريد
+      public_id: `${Date.now()}-${file.originalname.split('.')[0].replace(/[^a-zA-Z0-9]/g, "_")}`
     };
   }
 });
@@ -58,10 +64,9 @@ const storage = new CloudinaryStorage({
 const upload = multer({ 
   storage: storage,
   limits: { 
-    fileSize: 100 * 1024 * 1024 // 100 MB Limit
+    fileSize: 100 * 1024 * 1024 // 100 MB (كافٍ للفيديوهات القصيرة)
   },
   fileFilter: (req, file, cb) => {
-    // يمكنك رفض الملفات هنا إذا لزم الأمر، حالياً نقبل الجميع لأن Cloudinary سيفلتر الصيغ
     cb(null, true);
   }
 });
