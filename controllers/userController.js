@@ -63,7 +63,7 @@ exports.getUserProfile = asyncHandler(async (req, res) => {
     try {
         // ✨ التعديل هنا: إضافة is_super_admin و permissions إلى القائمة المختارة
         const [users] = await pool.query(
-            'SELECT id, name, email, role_id, phone_number, address, verification_status, has_accepted_agreement, profile_picture_url, is_super_admin, permissions FROM users WHERE id = ?', 
+            'SELECT id, name, email, role_id, phone_number, address, verification_status, has_accepted_agreement, profile_picture_url, store_banner_url, is_super_admin, permissions FROM users WHERE id = ?', 
             [req.user.id]
         );
         
@@ -500,6 +500,7 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
         u.id, 
         u.name, 
         u.profile_picture_url, 
+        u.store_banner_url, 
         u.bio, 
         u.stats, 
         u.social_links, 

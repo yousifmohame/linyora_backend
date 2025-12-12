@@ -127,6 +127,8 @@ const sectionRoutes = require('./routes/sectionRoutes');
 app.use('/api/sections', sectionRoutes);
 const storyRoutes = require('./routes/storyRoutes');
 app.use('/api/stories', storyRoutes);
+const flashSaleRoutes = require('./routes/flashSaleRoutes');
+app.use('/api/flash-sale', flashSaleRoutes);
 
 // --- Socket.IO Connection Management ---
 const userSocketMap = {};

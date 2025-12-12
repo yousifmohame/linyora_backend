@@ -5,7 +5,7 @@ const pool = require("../config/db");
 exports.getMyProfile = async (req, res) => {
   try {
     const [profile] = await pool.query(
-      "SELECT name, email, profile_picture_url, bio, portfolio, social_links, stats FROM users WHERE id = ?",
+      "SELECT name, email, profile_picture_url, store_banner_url, bio, portfolio, social_links, stats FROM users WHERE id = ?",
       [req.user.id]
     );
 
@@ -32,12 +32,12 @@ exports.getMyProfile = async (req, res) => {
 
 // [PUT] تحديث الملف الشخصي للمودل الحالية
 exports.updateMyProfile = async (req, res) => {
-  const { name, bio, portfolio, social_links, stats, profile_picture_url } =
+  const { name, bio, portfolio, social_links, stats, profile_picture_url, store_banner_url } =
     req.body;
   try {
     await pool.query(
       `UPDATE users SET 
-                name = ?, bio = ?, portfolio = ?, social_links = ?, stats = ?, profile_picture_url = ?
+                name = ?, bio = ?, portfolio = ?, social_links = ?, stats = ?, profile_picture_url = ?, store_banner_url = ?
              WHERE id = ?`,
       [
         name,
@@ -46,6 +46,7 @@ exports.updateMyProfile = async (req, res) => {
         JSON.stringify(social_links || {}),
         JSON.stringify(stats || {}),
         profile_picture_url,
+        store_banner_url, 
         req.user.id,
       ]
     );

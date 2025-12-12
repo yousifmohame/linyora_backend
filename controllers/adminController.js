@@ -904,12 +904,17 @@ exports.getAllPayoutRequests = asyncHandler(async (req, res) => {
  */
 exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { status, notes, user_type } = req.body; // user_type is crucial!
+  const { status, notes, user_type } = req.body; 
+
+  console.log(`🚀 [Payout Debug] Starting update for Request ID: ${id}`);
+  console.log(`📥 [Payout Debug] Input Data:`, { status, notes, user_type });
 
   if (!["approved", "rejected"].includes(status)) {
+    console.error("❌ [Payout Debug] Invalid status provided.");
     return res.status(400).json({ message: "Invalid status." });
   }
   if (!["merchant", "supplier"].includes(user_type)) {
+    console.error("❌ [Payout Debug] Invalid user_type provided.");
     return res.status(400).json({ message: "Invalid user type." });
   }
 
@@ -918,71 +923,104 @@ exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
     await connection.beginTransaction();
 
     const isMerchant = user_type === "merchant";
-    const requestTable = isMerchant
-      ? "payout_requests"
-      : "supplier_payout_requests";
-    const walletTable = isMerchant ? "merchant_wallets" : "supplier_wallets";
+    const requestTable = isMerchant ? "payout_requests" : "supplier_payout_requests";
     const userIdColumn = isMerchant ? "merchant_id" : "supplier_id";
 
-    // 1. Fetch the specific request to process it
-    const [[request]] = await connection.query(
-      `SELECT * FROM ${requestTable} WHERE id = ? AND status = "pending" FOR UPDATE`,
+    console.log(`🔎 [Payout Debug] Fetching request info from table: ${requestTable}...`);
+
+    // 1. جلب تفاصيل الطلب مع تفاصيل المستخدم
+    const [[requestInfo]] = await connection.query(
+      `SELECT pr.*, u.name, u.email, u.id as user_id
+       FROM ${requestTable} pr
+       JOIN users u ON pr.${userIdColumn} = u.id
+       WHERE pr.id = ? AND pr.status = "pending" FOR UPDATE`,
       [id]
     );
 
-    if (!request) {
+    // طباعة البيانات المسترجعة للتأكد منها
+    console.log("📄 [Payout Debug] Request Info Fetched:", requestInfo);
+
+    if (!requestInfo) {
+      console.warn("⚠️ [Payout Debug] Request not found or not pending.");
       await connection.rollback();
-      return res
-        .status(404)
-        .json({ message: "Request not found or already processed." });
+      return res.status(404).json({ message: "Request not found or already processed." });
     }
 
-    const userId = request[userIdColumn];
-
-    // 2. If rejected, refund the amount to the correct wallet
-    if (status === "rejected") {
-      await connection.query(
-        `UPDATE ${walletTable} SET balance = balance + ? WHERE ${userIdColumn} = ?`,
-        [request.amount, userId]
-      );
-    }
-
-    // 3. Update the request status
+    // 2. تحديث حالة الطلب في جدول الطلبات
+    console.log("🔄 [Payout Debug] Updating request status in DB...");
     await connection.query(
       `UPDATE ${requestTable} SET status = ?, notes = ? WHERE id = ?`,
       [status, notes, id]
     );
 
-    await connection.commit();
+    // 3. التعامل مع المحفظة بناءً على الحالة
+    if (status === "rejected") {
+        console.log("🛑 [Payout Debug] Status is REJECTED. Processing Refund...");
+        
+        // --- حالة الرفض: إعادة الأموال ---
+        await connection.query(
+            `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id) 
+             VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
+            [
+                requestInfo.user_id, 
+                requestInfo.amount, 
+                `استرداد طلب سحب مرفوض #${id}`,
+                id
+            ]
+        );
+        console.log("✅ [Payout Debug] Refund transaction created.");
 
-    // --- 🔔 الإشعارات ---
-    if (requestInfo) {
-        // 1. إشعار الموقع
+    } else if (status === "approved") {
+        console.log("✅ [Payout Debug] Status is APPROVED. Finalizing Transaction...");
+        
+        // --- حالة الموافقة: تأكيد الخصم ---
+        if (requestInfo.wallet_transaction_id) {
+            console.log(`🔗 [Payout Debug] Updating Wallet Transaction ID: ${requestInfo.wallet_transaction_id}`);
+            
+            const [updateResult] = await connection.query(
+                "UPDATE wallet_transactions SET status = 'paid', description = CONCAT(description, ' (تمت الموافقة)') WHERE id = ?",
+                [requestInfo.wallet_transaction_id]
+            );
+            console.log("✅ [Payout Debug] Wallet transaction updated. Affected Rows:", updateResult.affectedRows);
+        } else {
+            console.warn("⚠️ [Payout Debug] Warning: No wallet_transaction_id found in requestInfo!");
+        }
+    }
+
+    await connection.commit();
+    console.log("🎉 [Payout Debug] Transaction Committed Successfully.");
+
+    // --- 4. الإشعارات ---
+    try {
         const message = `تم ${status === 'approved' ? 'الموافقة على' : 'رفض'} طلب السحب رقم #${id}.`;
+        
         await pool.query(
             "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
             [requestInfo.user_id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/wallet"]
         );
+        console.log("🔔 [Payout Debug] Notification saved.");
 
-        // 2. إيميل
         sendEmail({
             to: requestInfo.email,
             subject: `تحديث حالة طلب السحب #${id}`,
             html: templates.payoutStatusUpdate(requestInfo.name, requestInfo.amount, status, notes)
-        }).catch(console.error);
+        }).then(() => console.log("📧 [Payout Debug] Email sent.")).catch(err => console.error("📧 [Payout Debug] Email failed:", err));
+
+    } catch (notifyError) {
+        console.error("⚠️ [Payout Debug] Notification/Email Error (Non-blocking):", notifyError);
     }
 
     res.json({ message: `Request for ${user_type} has been ${status}.` });
 
-    // (Optional: Send email notification to user)
   } catch (error) {
     await connection.rollback();
-    console.error(`Error updating ${user_type} payout status:`, error);
+    console.error(`🔥 [Payout Debug] CRITICAL ERROR updating ${user_type} payout status:`, error);
     res.status(500).json({ message: "Server error" });
   } finally {
     connection.release();
   }
 });
+
 
 /**
  * @desc    Admin: Get details for a single payout request (merchant or supplier)

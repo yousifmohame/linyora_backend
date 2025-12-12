@@ -13,29 +13,32 @@ exports.getMerchantWallet = async (req, res) => {
   try {
     const query = `
             SELECT
-                -- الرصيد القابل للسحب هو مجموع الأرباح المكتملة
-                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') AS balance,
-                -- الرصيد المعلق هو مجموع الأرباح التي لم تكتمل بعد
-                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'pending_clearance') AS pending_clearance
+                -- ✨ التصحيح هنا: نجمع كل المعاملات (أرباح + وسحوبات -) التي حالتها 'cleared' أو 'paid'
+                (SELECT COALESCE(SUM(amount), 0) 
+                 FROM wallet_transactions 
+                 WHERE user_id = ? 
+                 AND status IN ('cleared', 'paid')) AS balance,
+                 
+                -- الرصيد المعلق
+                (SELECT COALESCE(SUM(amount), 0) 
+                 FROM wallet_transactions 
+                 WHERE user_id = ? 
+                 AND status = 'pending_clearance') AS pending_clearance
             FROM DUAL;
         `;
     const [[wallet]] = await pool.query(query, [merchantId, merchantId]);
 
-    // يمكنك إضافة منطق إجمالي الأرباح وعمليات السحب السابقة بنفس الطريقة
-    const [[payouts]] = await pool.query(
-      "SELECT COALESCE(SUM(amount), 0) as total_paid FROM payout_requests WHERE merchant_id = ? AND status = 'approved'",
+    // حساب إجمالي الأرباح (اختياري للعرض فقط)
+    // نجمع فقط المعاملات الموجبة من نوع 'earning'
+    const [[earningsData]] = await pool.query(
+      "SELECT COALESCE(SUM(amount), 0) as total FROM wallet_transactions WHERE user_id = ? AND type = 'earning'",
       [merchantId]
     );
-    const totalPaid = parseFloat(payouts.total_paid);
-    const totalEarnings =
-      parseFloat(wallet.balance) +
-      parseFloat(wallet.pending_clearance) +
-      totalPaid;
 
     res.json({
       balance: parseFloat(wallet.balance).toFixed(2),
       pending_clearance: parseFloat(wallet.pending_clearance).toFixed(2),
-      total_earnings: totalEarnings.toFixed(2),
+      total_earnings: parseFloat(earningsData.total).toFixed(2),
     });
   } catch (error) {
     console.error("Error fetching merchant wallet data:", error);
@@ -196,14 +199,21 @@ exports.requestPayout = async (req, res) => {
     // ملاحظة: نحتاج اسم التاجر، إذا لم يكن في req.user، يجب جلبه
     let name = req.user.name;
     if (!name) {
-        const [[user]] = await pool.query("SELECT name FROM users WHERE id = ?", [merchantId]);
-        name = user?.name || "Merchant";
+      const [[user]] = await pool.query("SELECT name FROM users WHERE id = ?", [
+        merchantId,
+      ]);
+      name = user?.name || "Merchant";
     }
 
     sendEmail({
-        to: adminEmail,
-        subject: `طلب سحب جديد من ${name}`,
-        html: templates.payoutRequestAdmin(name, "Merchant", numericAmount, "New") // مرر الـ ID إذا توفر
+      to: adminEmail,
+      subject: `طلب سحب جديد من ${name}`,
+      html: templates.payoutRequestAdmin(
+        name,
+        "Merchant",
+        numericAmount,
+        "New"
+      ), // مرر الـ ID إذا توفر
     }).catch(console.error);
 
     res.status(201).json({ message: "تم إرسال طلب السحب بنجاح." });
@@ -312,7 +322,7 @@ exports.requestModelPayout = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // --- ⭐️ بداية الإضافة: التحقق من الطلبات المعلقة ---
+    // التحقق من الطلبات المعلقة
     const [pendingRequests] = await connection.query(
       "SELECT COUNT(*) as count FROM model_payout_requests WHERE user_id = ? AND status = 'pending'",
       [userId]
@@ -325,9 +335,8 @@ exports.requestModelPayout = async (req, res) => {
         .status(400)
         .json({ message: "لديك طلب سحب قيد المراجعة بالفعل." });
     }
-    // --- ⭐️ نهاية الإضافة ---
 
-    // حساب الرصيد المتاح مباشرة من المعاملات المكتملة
+    // حساب الرصيد المتاح
     const [[wallet]] = await connection.query(
       `SELECT COALESCE(SUM(amount), 0) as balance 
        FROM wallet_transactions 
@@ -343,7 +352,7 @@ exports.requestModelPayout = async (req, res) => {
         .json({ message: "رصيدك غير كافٍ لإتمام عملية السحب." });
     }
 
-    // 1. إنشاء معاملة سحب جديدة في wallet_transactions بالسالب
+    // 1. إنشاء معاملة سحب جديدة في wallet_transactions
     const [txInsert] = await connection.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, status, description) 
        VALUES (?, ?, 'payout', 'cleared', ?)`,
@@ -351,27 +360,24 @@ exports.requestModelPayout = async (req, res) => {
     );
     const txId = txInsert.insertId;
 
-    // 2. تسجيل طلب السحب للمراجعة الإدارية
-    await connection.query(
+    // 2. تسجيل طلب السحب (التصحيح هنا: تعريف المتغير result)
+    const [result] = await connection.query(
       "INSERT INTO model_payout_requests (user_id, amount, status, wallet_transaction_id) VALUES (?, ?, 'pending', ?)",
       [userId, numericAmount, txId]
     );
 
     await connection.commit();
 
-    const adminEmail = process.env.ADMIN_EMAIL || "me8999109@gmail.com";
-    
-    // ملاحظة: نحتاج اسم التاجر، إذا لم يكن في req.user، يجب جلبه
-    let name = req.user.name;
-    if (!name) {
-        const [[user]] = await pool.query("SELECT name FROM users WHERE id = ?", [merchantId]);
-        name = user?.name || "Merchant";
-    }
-
+    // الآن المتغير result معرف ويمكن استخدامه
     sendEmail({
-        to: process.env.ADMIN_EMAIL,
-        subject: `طلب سحب جديد من ${req.user.name}`,
-        html: templates.payoutRequestAdmin(req.user.name, "Model", numericAmount, result.insertId)
+      to: process.env.ADMIN_EMAIL,
+      subject: `طلب سحب جديد من ${req.user.name}`,
+      html: templates.payoutRequestAdmin(
+        req.user.name,
+        "Model",
+        numericAmount,
+        result.insertId
+      ),
     }).catch(console.error);
 
     res.status(201).json({ message: "تم إرسال طلب السحب بنجاح." });

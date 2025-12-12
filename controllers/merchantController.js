@@ -1068,16 +1068,13 @@ exports.deleteProduct = asyncHandler(async (req, res) => {
 // @desc    Get merchant public profile by ID
 // @route   GET /api/merchants/public-profile/:id
 // @access  Public
-// backend/controllers/merchantController.js
-
 exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  // 👇 [تعديل هام] نعتمد الآن على optionalProtect
-  // إذا كان المستخدم مسجلاً، سيكون req.user موجوداً. إذا لا، سيكون currentUserId = null
+  // معرف المستخدم الحالي (إذا كان مسجلاً الدخول)
   const currentUserId = req.user ? req.user.id : null;
 
-  // 1️⃣ جلب بيانات التاجر + الإحصائيات + حالة المتابعة
+  // 1️⃣ جلب بيانات التاجر + جميع الإحصائيات المطلوبة للواجهة
   const [users] = await pool.query(
     `SELECT 
         u.id, 
@@ -1086,6 +1083,7 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
         u.profile_picture_url, 
         u.store_banner_url as cover_url, 
         u.store_description as bio,
+        u.address as location,
         u.created_at as joined_date,
         
         -- تقييم التاجر
@@ -1094,14 +1092,27 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
         -- عدد التقييمات
         (SELECT COUNT(pr.id) FROM product_reviews pr JOIN products p ON p.id = pr.product_id WHERE p.merchant_id = u.id) as reviews_count,
 
-        -- عدد المتابعين
+        -- عدد المتابعين (Followers)
         (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers_count,
 
-        -- هل يتابعه المستخدم الحالي؟ (سيعمل بشكل صحيح حتى لو كان currentUserId هو null)
+        -- عدد من يتابعهم التاجر (Following) - ✨ (جديد)
+        (SELECT COUNT(*) FROM user_follows WHERE follower_id = u.id) as following_count,
+
+        -- عدد المنشورات/المنتجات النشطة
+        (SELECT COUNT(*) FROM products WHERE merchant_id = u.id AND status = 'active') as posts_count,
+
+        -- إجمالي المبيعات (من جدول تفاصيل الطلبات) - ✨ (جديد)
+        -- نفترض وجود جدول order_items يربط المنتج بالكمية المباعة
+        (SELECT COALESCE(SUM(quantity), 0) 
+         FROM order_items oi 
+         JOIN products p ON oi.product_id = p.id 
+         WHERE p.merchant_id = u.id) as total_sales,
+
+        -- هل يتابعه المستخدم الحالي؟
         EXISTS(SELECT 1 FROM user_follows WHERE follower_id = ? AND following_id = u.id) as isFollowedByMe
 
-     FROM users u 
-     WHERE u.id = ? AND u.role_id = 2 AND u.is_email_verified = 1`,
+      FROM users u 
+      WHERE u.id = ? AND u.role_id = 2`, // تأكد من رقم الدور للتاجر
     [currentUserId, id] 
   );
 
@@ -1112,14 +1123,16 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
 
   const merchant = users[0];
 
-  // 2️⃣ جلب المنتجات (نفس الكود السابق تماماً)
+  // 2️⃣ جلب المنتجات
   const [rawProducts] = await pool.query(
     `SELECT 
         p.id, p.name, p.status, p.description,
         u.store_name as merchantName,
         (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
         (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
+        -- جلب أقل سعر من المتغيرات لعرضه "يبدأ من"
         (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as price,
+        (SELECT compare_at_price FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as compare_at_price,
         (SELECT images FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as variant_images_json
       FROM products p
       JOIN users u ON p.merchant_id = u.id
@@ -1128,7 +1141,7 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
     [id]
   );
 
-  // 3️⃣ تنسيق البيانات
+  // 3️⃣ تنسيق منتجات التاجر لتناسب واجهة ProductCard
   const products = rawProducts.map((product) => {
     let variantImages = [];
     try {
@@ -1145,10 +1158,12 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
       rating: Number(product.rating) || 0,
       reviewCount: Number(product.reviewCount) || 0,
       merchantName: product.merchantName,
+      // هيكل وهمي للمتغيرات ليقبلها الـ Frontend
       variants: [{
-        id: 0,
+        id: 0, 
         price: product.price || 0,
-        compare_at_price: null,
+        compare_at_price: product.compare_at_price,
+        stock_quantity: 1, // افتراضي
         images: variantImages,
       }],
     };
@@ -1156,9 +1171,13 @@ exports.getMerchantPublicProfile = asyncHandler(async (req, res) => {
 
   res.json({
     ...merchant,
-    rating: Number(merchant.rating).toFixed(1), 
+    // تحويل الأرقام لضمان عدم حدوث مشاكل في التنسيق
+    rating: Number(merchant.rating), 
     reviews_count: Number(merchant.reviews_count),
     followers_count: Number(merchant.followers_count),
+    following_count: Number(merchant.following_count),
+    posts_count: Number(merchant.posts_count),
+    total_sales: Number(merchant.total_sales),
     isFollowedByMe: Boolean(merchant.isFollowedByMe), 
     products: products || [],
   });
