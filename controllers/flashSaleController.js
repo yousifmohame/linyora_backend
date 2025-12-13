@@ -29,12 +29,15 @@ exports.getActiveFlashSale = asyncHandler(async (req, res) => {
         fsp.discount_percentage,
         fsp.sold_quantity as sold,
         fsp.total_quantity as total,
-        p.id, p.name, 
-        (SELECT MIN(price) FROM product_variants WHERE product_id = p.id) as originalPrice,
-        (SELECT images FROM product_variants WHERE product_id = p.id LIMIT 1) as images_json
+        p.id, p.name, p.merchant_id,
+        (SELECT id FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as default_variant_id,
+        (SELECT price FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as originalPrice,
+        (SELECT images FROM product_variants WHERE product_id = p.id ORDER BY price ASC LIMIT 1) as images_json
      FROM flash_sale_products fsp
      JOIN products p ON fsp.product_id = p.id
-     WHERE fsp.flash_sale_id = ?`,
+     WHERE fsp.flash_sale_id = ? 
+       AND fsp.status = 'accepted' -- ✅ هذا الشرط سيمنع ظهور المنتجات غير الموافق عليها
+       AND fsp.sold_quantity < fsp.total_quantity`,
     [sale.id]
   );
 
@@ -51,6 +54,8 @@ exports.getActiveFlashSale = asyncHandler(async (req, res) => {
 
     return {
         id: p.id,
+        variant_id: p.default_variant_id, // ✅ إرسال رقم المتغير الحقيقي
+        merchant_id: p.merchant_id,
         name: p.name,
         originalPrice,
         discountPrice: Math.round(discountPrice), // أو toFixed(2)
@@ -81,33 +86,89 @@ exports.getActiveFlashSale = asyncHandler(async (req, res) => {
 // @route   POST /api/admin/flash-sale
 // @access  Private/Admin
 exports.createFlashSale = asyncHandler(async (req, res) => {
-    const { title, start_time, end_time, products } = req.body; // products = [{productId, discount, totalQty}]
+    const { title, start_time, end_time, items } = req.body; 
+    // items should be: [{ productId, variantId, merchantId, originalPrice, discount, totalQty }]
 
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
 
-        const [result] = await connection.query(
+        // 1. إنشاء الحملة
+        const [saleResult] = await connection.query(
             "INSERT INTO flash_sales (title, start_time, end_time) VALUES (?, ?, ?)",
             [title, start_time, end_time]
         );
-        const saleId = result.insertId;
+        const saleId = saleResult.insertId;
 
-        for (const prod of products) {
+        // 2. إرسال الدعوات للمنتجات (Variants)
+        for (const item of items) {
+            const flashPrice = item.originalPrice - (item.originalPrice * (item.discount / 100));
+            
             await connection.query(
-                "INSERT INTO flash_sale_products (flash_sale_id, product_id, discount_percentage, total_quantity) VALUES (?, ?, ?, ?)",
-                [saleId, prod.productId, prod.discount, prod.totalQty]
+                `INSERT INTO flash_sale_products 
+                (flash_sale_id, product_id, variant_id, merchant_id, discount_percentage, flash_price, total_quantity, status) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+                [saleId, item.productId, item.variantId, item.merchantId, item.discount, flashPrice, item.totalQty]
+            );
+
+            // ✨ (اختياري) إرسال إشعار للتاجر هنا
+             await connection.query(
+                "INSERT INTO notifications (user_id, type, message, link) VALUES (?, 'CAMPAIGN_INVITE', ?, ?)",
+                [item.merchantId, `دعوة للانضمام لحملة: ${title}`, '/dashboard/campaigns']
             );
         }
 
         await connection.commit();
-        res.status(201).json({ message: "Flash sale created successfully" });
+        res.status(201).json({ message: "تم إنشاء الحملة وإرسال الدعوات للتجار." });
     } catch (error) {
         await connection.rollback();
         throw error;
     } finally {
         connection.release();
     }
+});
+
+// ب. دالة للتاجر للموافقة/الرفض
+exports.respondToCampaign = asyncHandler(async (req, res) => {
+    const { id } = req.params; // flash_sale_product id
+    const { status } = req.body; // 'accepted' or 'rejected'
+    const merchantId = req.user.id;
+
+    if (!['accepted', 'rejected'].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const [result] = await pool.query(
+        "UPDATE flash_sale_products SET status = ? WHERE id = ? AND merchant_id = ?",
+        [status, id, merchantId]
+    );
+
+    if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "Item not found or unauthorized" });
+    }
+
+    res.json({ message: `Campaign invitation ${status}` });
+});
+
+// ج. دالة للتاجر لرؤية الدعوات
+exports.getMerchantCampaigns = asyncHandler(async (req, res) => {
+    const merchantId = req.user.id;
+    
+    const [campaigns] = await pool.query(`
+        SELECT 
+            fsp.id, fsp.status, fsp.discount_percentage, fsp.flash_price, fsp.total_quantity,
+            fs.title as campaign_title, fs.start_time, fs.end_time,
+            p.name as product_name, 
+            v.color, v.price as original_price
+        FROM flash_sale_products fsp
+        JOIN flash_sales fs ON fsp.flash_sale_id = fs.id
+        JOIN products p ON fsp.product_id = p.id
+        JOIN product_variants v ON fsp.variant_id = v.id
+        WHERE fsp.merchant_id = ?
+        ORDER BY fs.start_time DESC
+    `, [merchantId]);
+
+    res.json(campaigns);
 });
 
 // @desc    Get all flash sales (Admin)

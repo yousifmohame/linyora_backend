@@ -269,6 +269,8 @@ exports.createOrderInternal = async (orderPayload) => {
       [variantIds]
     );
 
+    
+
     // إنشاء خريطة لبيانات كل منتج
     const variantDetailsMap = {};
     variantsInfo.forEach((v) => {
