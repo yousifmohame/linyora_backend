@@ -251,9 +251,45 @@ exports.createOrderInternal = async (orderPayload) => {
       [customerId]
     );
 
-    // 1. جلب تفاصيل المنتجات والموردين (التعديل الجوهري هنا)
-    // نحتاج لمعرفة هل المنتج (Variant) مرتبط بمورد أم لا لفصله
-    const variantIds = cartItems.map((item) => item.id); // بافتراض أن item.id هو Variant ID
+    // =========================================================================
+    // ✅ 1. (جديد) معالجة العروض الخاطفة: التحقق من الكمية وتحديث العداد
+    // =========================================================================
+    for (const item of cartItems) {
+      // نبحث عما إذا كان هذا المنتج (Variant) جزءاً من عرض خاطف "نشط حالياً"
+      const [flashSaleInfo] = await connection.query(
+        `SELECT fsp.id, fsp.sold_quantity, fsp.total_quantity, fsp.flash_price 
+         FROM flash_sale_products fsp
+         JOIN flash_sales fs ON fsp.flash_sale_id = fs.id
+         WHERE fsp.variant_id = ? 
+           AND fsp.status = 'accepted'
+           AND fs.is_active = 1 
+           AND NOW() BETWEEN fs.start_time AND fs.end_time
+         FOR UPDATE`, // نستخدم FOR UPDATE لمنع التضارب في اللحظة نفسها
+        [item.id] // item.id هو variant_id
+      );
+
+      // إذا وجدنا أن المنتج جزء من عرض نشط
+      if (flashSaleInfo.length > 0) {
+        const flashItem = flashSaleInfo[0];
+
+        // التحقق: هل الكمية المطلوبة ستتجاوز الكمية المخصصة للعرض؟
+        if (flashItem.sold_quantity + item.quantity > flashItem.total_quantity) {
+          throw new Error(
+            `عذراً، الكمية المتاحة في العرض الخاطف للمنتج ${item.name} قد نفذت أو غير كافية.`
+          );
+        }
+
+        // تحديث: زيادة الكمية المباعة في جدول العروض
+        await connection.query(
+          "UPDATE flash_sale_products SET sold_quantity = sold_quantity + ? WHERE id = ?",
+          [item.quantity, flashItem.id]
+        );
+      }
+    }
+    // =========================================================================
+
+    // 2. جلب تفاصيل المنتجات والموردين (كما هو في كودك الأصلي)
+    const variantIds = cartItems.map((item) => item.id);
 
     const [variantsInfo] = await connection.query(
       `SELECT 
@@ -269,33 +305,28 @@ exports.createOrderInternal = async (orderPayload) => {
       [variantIds]
     );
 
-    
-
     // إنشاء خريطة لبيانات كل منتج
     const variantDetailsMap = {};
     variantsInfo.forEach((v) => {
       variantDetailsMap[v.variant_id] = {
         merchant_id: v.merchant_id,
-        supplier_id: v.supplier_id || null, // إذا كان null فهو منتج تاجر عادي
+        supplier_id: v.supplier_id || null,
       };
     });
 
-    // 2. تجميع المنتجات (فصل الدروبشيبينغ عن العادي)
+    // 3. تجميع المنتجات (فصل الدروبشيبينغ عن العادي)
     const ordersMap = new Map();
 
     for (const item of cartItems) {
       const details = variantDetailsMap[item.id];
       if (!details) throw new Error(`Product Variant ${item.id} not found.`);
 
-      // المفتاح الفريد للتجميع: دمج معرف التاجر مع معرف المورد
-      // إذا كان المنتج عادي: Key = "123_null"
-      // إذا كان دروبشيبينغ: Key = "123_456" (حيث 456 هو المورد)
       const groupKey = `${details.merchant_id}_${details.supplier_id}`;
 
       if (!ordersMap.has(groupKey)) {
         ordersMap.set(groupKey, {
           merchantId: details.merchant_id,
-          supplierId: details.supplier_id, // نحتفظ به لنعرف نوع الطلب
+          supplierId: details.supplier_id,
           items: [],
           merchantTotal: 0,
         });
@@ -306,16 +337,12 @@ exports.createOrderInternal = async (orderPayload) => {
       group.merchantTotal += Number(item.price) * item.quantity;
     }
 
-    // 3. إنشاء الطلبات بناءً على المجموعات المفصولة
+    // 4. إنشاء الطلبات في جدول Orders
     for (const [groupKey, group] of ordersMap.entries()) {
       let shippingCost = 0;
       let shippingCompanyId = null;
 
-      // حساب الشحن (يتم تطبيقه على كل طلب منفصل)
-      if (
-        merchant_shipping_selections &&
-        Array.isArray(merchant_shipping_selections)
-      ) {
+      if (merchant_shipping_selections && Array.isArray(merchant_shipping_selections)) {
         const selection = merchant_shipping_selections.find(
           (s) => String(s.merchant_id) === String(group.merchantId)
         );
@@ -333,7 +360,6 @@ exports.createOrderInternal = async (orderPayload) => {
 
       const orderTotal = group.merchantTotal + shippingCost;
 
-      // إدراج الطلب في قاعدة البيانات
       const [orderResult] = await connection.query(
         `INSERT INTO orders (customer_id, status, payment_status, payment_method, total_amount, shipping_address_id, shipping_company_id, shipping_cost, stripe_session_id) 
          VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
@@ -352,7 +378,7 @@ exports.createOrderInternal = async (orderPayload) => {
       const orderId = orderResult.insertId;
       createdOrderIds.push(orderId);
 
-      // معالجة العناصر
+      // معالجة العناصر وإضافتها لجدول order_items
       const suppliersToNotify = await processOrderItems(
         orderId,
         group.items,
@@ -363,19 +389,13 @@ exports.createOrderInternal = async (orderPayload) => {
       await calculateAndRecordEarnings(orderId, connection);
 
       // --- إرسال الإشعارات ---
-
-      // أ) إشعار التاجر (يصل للتاجر إشعار بوجود طلب)
       const [[merchant]] = await connection.query(
         "SELECT email, name FROM users WHERE id = ?",
         [group.merchantId]
       );
 
       if (merchant) {
-        // تحديد نوع الرسالة للتاجر
-        // إذا كان الطلب للمورد (group.supplierId موجود)، نرسل له تنبيه "مبيعة دروبشيبينغ" وليس "طلب جديد للشحن"
-        const notificationType = group.supplierId
-          ? "DROPSHIP_SALE"
-          : "NEW_ORDER";
+        const notificationType = group.supplierId ? "DROPSHIP_SALE" : "NEW_ORDER";
         const notificationMsg = group.supplierId
           ? `تم بيع منتج دروبشيبينغ (طلب #${orderId})`
           : `طلب جديد للشحن رقم #${orderId}`;
@@ -391,8 +411,6 @@ exports.createOrderInternal = async (orderPayload) => {
           ]
         );
 
-        // إرسال الإيميل للتاجر
-        // يمكنك هنا تخصيص قالب مختلف إذا كان الطلب دروبشيبينغ ليعلم التاجر أنه ليس عليه شحنه
         emailsToSend.push({
           to: merchant.email,
           subject: `طلب جديد #${orderId} - لينورا`,
@@ -404,7 +422,6 @@ exports.createOrderInternal = async (orderPayload) => {
         });
       }
 
-      // ب) إشعارات الموردين (يصل فقط إذا كان الطلب يحتوي على منتجاتهم)
       for (const [supplierId, data] of suppliersToNotify.entries()) {
         await connection.query(
           "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
@@ -423,7 +440,6 @@ exports.createOrderInternal = async (orderPayload) => {
         });
       }
 
-      // ج) إشعار العميل (يصل لكل طلب منفصل ليعرف التقسيم)
       if (customer) {
         emailsToSend.push({
           to: customer.email,
@@ -443,8 +459,6 @@ exports.createOrderInternal = async (orderPayload) => {
       console.error
     );
 
-    // إرجاع مصفوفة المعرفات بدلاً من معرف واحد
-    // ملاحظة: قد تحتاج لتعديل الـ Frontend ليتعامل مع مصفوفة إذا كنت تستخدمها في التوجيه
     return createdOrderIds;
   } catch (error) {
     await connection.rollback();

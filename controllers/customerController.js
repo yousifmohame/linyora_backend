@@ -282,6 +282,13 @@ exports.addToWishlist = async (req, res) => {
 
 exports.checkWishlistStatus = async (req, res) => {
   const { productIds } = req.body;
+
+  // ✅ إصلاح: التحقق من وجود المستخدم قبل الوصول إلى الـ ID
+  // هذا يمنع تعطل السيرفر إذا تم استدعاء الرابط بدون تسجيل دخول
+  if (!req.user || !req.user.id) {
+      return res.status(401).json({ message: "غير مصرح، يرجى تسجيل الدخول للوصول إلى المفضلة." });
+  }
+
   if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
     return res.status(200).json({});
   }

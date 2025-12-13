@@ -84,7 +84,10 @@ const {
 
 const {
   createFlashSale,
-  getAllFlashSales
+  getAllFlashSales,
+  getAvailableProductsForFlashSale,
+  updateFlashSale,
+  deleteFlashSale
 } = require("../controllers/flashSaleController");
 
 const {
@@ -292,6 +295,9 @@ router.delete('/sections/:id', checkPermission("sections", "write"), sectionCont
 
 router.get('/flash-sales', checkPermission('settings', 'read'), getAllFlashSales);
 router.post('/flash-sale', checkPermission('settings', 'write'), createFlashSale);
+router.get('/flash-sale/products-available', checkPermission('settings', 'read'), getAvailableProductsForFlashSale);
+router.put('/flash-sale/:id', checkPermission('settings', 'write'), updateFlashSale);
+router.delete('/flash-sale/:id', checkPermission('settings', 'write'), deleteFlashSale);
 
 // =================================================================
 // 📝 CONTENT (Pages like About Us, Terms)

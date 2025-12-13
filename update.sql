@@ -50,3 +50,25 @@ CREATE TABLE flash_sale_products (
     FOREIGN KEY (flash_sale_id) REFERENCES flash_sales(id) ON DELETE CASCADE,
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
 );
+
+-- 1. حذف الجدول القديم لضمان نظافة البيانات (إذا كان فيه بيانات تجريبية)
+DROP TABLE IF EXISTS flash_sale_products;
+
+-- 2. إعادة إنشاء الجدول مع الأعمدة الجديدة
+CREATE TABLE flash_sale_products (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    flash_sale_id INT NOT NULL,
+    product_id INT NOT NULL,
+    variant_id INT NOT NULL, -- ✨ نربط الخصم بمتغير محدد
+    merchant_id INT NOT NULL, -- ✨ لنعرف من هو التاجر المسؤول
+    discount_percentage DECIMAL(5,2) NOT NULL,
+    flash_price DECIMAL(10,2) NOT NULL, -- ✨ السعر بعد الخصم (للتسهيل)
+    sold_quantity INT DEFAULT 0,
+    total_quantity INT NOT NULL,
+    status ENUM('pending', 'accepted', 'rejected') DEFAULT 'pending', -- ✨ حالة موافقة التاجر
+    rejection_reason TEXT NULL,
+    FOREIGN KEY (flash_sale_id) REFERENCES flash_sales(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    FOREIGN KEY (variant_id) REFERENCES product_variants(id) ON DELETE CASCADE,
+    FOREIGN KEY (merchant_id) REFERENCES users(id) ON DELETE CASCADE
+);
