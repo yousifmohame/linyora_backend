@@ -146,6 +146,9 @@ exports.createFlashSale = asyncHandler(async (req, res) => {
         throw new Error("يجب اختيار منتجات للحملة.");
     }
 
+    const formattedStartTime = new Date(start_time).toISOString().slice(0, 19).replace('T', ' ');
+    const formattedEndTime = new Date(end_time).toISOString().slice(0, 19).replace('T', ' ');
+
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -177,7 +180,7 @@ exports.createFlashSale = asyncHandler(async (req, res) => {
         // 2. إنشاء الحملة
         const [saleResult] = await connection.query(
             "INSERT INTO flash_sales (title, start_time, end_time) VALUES (?, ?, ?)",
-            [title, start_time, end_time]
+            [title, formattedStartTime, formattedEndTime]
         );
         const saleId = saleResult.insertId;
 
