@@ -8,7 +8,17 @@ const asyncHandler = require("express-async-handler");
  */
 exports.submitVerification = async (req, res) => {
   const supplierId = req.user.id;
-  const { identity_number, business_name, account_number, iban } = req.body;
+  
+  // استقبال الحقول الجديدة (bank_name, account_holder_name) إذا توفرت
+  const { 
+    identity_number, 
+    business_name, 
+    account_number, 
+    iban, 
+    bank_name, 
+    account_holder_name 
+  } = req.body;
+  
   const files = req.files;
 
   if (
@@ -25,14 +35,23 @@ exports.submitVerification = async (req, res) => {
 
   const connection = await pool.getConnection();
   try {
+    // جلب اسم المستخدم لاستخدامه كاحتياط لاسم صاحب الحساب
+    const [[user]] = await connection.query("SELECT name FROM users WHERE id = ?", [supplierId]);
+
+    // تحديد القيم الافتراضية للحقول الجديدة
+    // للمورد: نفضل اسم صاحب الحساب القادم من الطلب > ثم اسم الشركة > ثم اسم المستخدم
+    const finalAccountHolder = account_holder_name || business_name || user.name || 'Unknown';
+    const finalBankName = bank_name || 'Bank';
+
     await connection.beginTransaction();
 
+    // 1. تحديث بيانات المستخدم (الهوية والسجل التجاري)
     await connection.query(
       `UPDATE users SET 
                 identity_number = ?, business_name = ?, 
                 identity_image_url = ?, business_license_url = ?, 
                 verification_status = 'pending' 
-             WHERE id = ?`,
+              WHERE id = ?`,
       [
         identity_number,
         business_name,
@@ -42,14 +61,27 @@ exports.submitVerification = async (req, res) => {
       ]
     );
 
+    // 2. إدخال أو تحديث البيانات في الجدول الموحد `bank_details`
     await connection.query(
-      `INSERT INTO merchant_bank_details (user_id, account_number, iban, iban_certificate_url) 
-             VALUES (?, ?, ?, ?) 
-             ON DUPLICATE KEY UPDATE 
-                account_number = VALUES(account_number), 
-                iban = VALUES(iban), 
-                iban_certificate_url = VALUES(iban_certificate_url)`,
-      [supplierId, account_number, iban, files.iban_certificate[0].path]
+      `INSERT INTO bank_details 
+             (user_id, bank_name, account_holder_name, account_number, iban, iban_certificate_url, status, is_verified) 
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', 0) 
+            ON DUPLICATE KEY UPDATE 
+              bank_name = VALUES(bank_name),
+              account_holder_name = VALUES(account_holder_name),
+              account_number = VALUES(account_number), 
+              iban = VALUES(iban), 
+              iban_certificate_url = VALUES(iban_certificate_url),
+              status = 'pending',
+              is_verified = 0`,
+      [
+        supplierId, 
+        finalBankName,       // الحقل الجديد
+        finalAccountHolder,  // الحقل الجديد
+        account_number, 
+        iban, 
+        files.iban_certificate[0].path
+      ]
     );
 
     await connection.commit();

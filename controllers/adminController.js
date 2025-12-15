@@ -782,13 +782,15 @@ exports.getPendingVerifications = async (req, res) => {
 exports.getVerificationDetails = async (req, res) => {
   try {
     const { id } = req.params;
-    // ✨ إضافة social_links و stats إلى الاستعلام
+    
+    // 1. جلب بيانات المستخدم الأساسية + بيانات التوثيق
     const [user] = await pool.query(
-      "SELECT id, name, email, identity_number, identity_image_url, business_name, business_license_url, social_links, stats FROM users WHERE id = ?",
-      [id]
-    );
-    const [bank] = await pool.query(
-      "SELECT account_number, iban, iban_certificate_url FROM merchant_bank_details WHERE user_id = ?",
+      `SELECT 
+         id, name, email, phone_number, role_id,
+         identity_number, identity_image_url, 
+         business_name, business_license_url, 
+         social_links, stats, verification_status 
+       FROM users WHERE id = ?`,
       [id]
     );
 
@@ -796,15 +798,41 @@ exports.getVerificationDetails = async (req, res) => {
       return res.status(404).json({ message: "User not found." });
     }
 
-    // ✨ التأكد من أن البيانات هي كائنات JSON وليست نصوص
+    // 2. جلب البيانات البنكية من الجدول الموحد الجديد (bank_details)
+    const [bank] = await pool.query(
+      `SELECT 
+         bank_name, 
+         account_holder_name, 
+         account_number, 
+         iban, 
+         iban_certificate_url,
+         status,
+         is_verified
+       FROM bank_details 
+       WHERE user_id = ?`,
+      [id]
+    );
+
+    // 3. معالجة بيانات JSON (لضمان عدم حدوث خطأ إذا كانت الحقول فارغة أو نصية)
     const userProfile = user[0];
-    userProfile.social_links = userProfile.social_links
-      ? JSON.parse(userProfile.social_links)
-      : {};
-    userProfile.stats = userProfile.stats ? JSON.parse(userProfile.stats) : {};
+    
+    try {
+        userProfile.social_links = typeof userProfile.social_links === 'string' 
+            ? JSON.parse(userProfile.social_links) 
+            : (userProfile.social_links || {});
+            
+        userProfile.stats = typeof userProfile.stats === 'string' 
+            ? JSON.parse(userProfile.stats) 
+            : (userProfile.stats || {});
+    } catch (e) {
+        // في حال حدوث خطأ في التحليل، نعيد كائنات فارغة
+        userProfile.social_links = {};
+        userProfile.stats = {};
+    }
 
     res.json({ user: userProfile, bank: bank[0] || {} });
   } catch (error) {
+    console.error("Error fetching verification details:", error);
     res.status(500).json({ message: "Failed to fetch verification details." });
   }
 };
@@ -1036,6 +1064,7 @@ exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
   }
 
   const isMerchant = user_type === "merchant";
+  // ما زلنا نستخدم جداول الطلبات المنفصلة (حسب تصميمك)، ولكن نوحد جدول البنك
   const requestTable = isMerchant
     ? "payout_requests"
     : "supplier_payout_requests";
@@ -1044,13 +1073,21 @@ exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
   try {
     const [details] = await pool.query(
       `SELECT 
-                pr.id, pr.amount, pr.status, pr.created_at,
-                u.name, u.email, u.phone_number,
-                mbd.account_number, mbd.iban, mbd.iban_certificate_url
-             FROM ${requestTable} pr
-             JOIN users u ON ${userIdColumn} = u.id
-             LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
-             WHERE pr.id = ?`,
+          pr.id, pr.amount, pr.status, pr.created_at,
+          u.name, u.email, u.phone_number,
+          
+          -- ✅ جلب البيانات البنكية من الجدول الموحد
+          bd.bank_name, 
+          bd.account_holder_name,
+          bd.account_number, 
+          bd.iban, 
+          bd.iban_certificate_url
+
+       FROM ${requestTable} pr
+       JOIN users u ON ${userIdColumn} = u.id
+       -- ✅ الربط مع جدول bank_details بدلاً من merchant_bank_details
+       LEFT JOIN bank_details bd ON u.id = bd.user_id 
+       WHERE pr.id = ?`,
       [id]
     );
 
@@ -1178,7 +1215,6 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
  */
 exports.getAllModelPayouts = async (req, res) => {
   try {
-    // ✨ [الحل] قمنا بتطبيق نفس منطق الـ JOIN من دالة getModelPayoutDetails
     const [requests] = await pool.query(`
         SELECT 
           mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
@@ -1186,15 +1222,17 @@ exports.getAllModelPayouts = async (req, res) => {
           u.name as userName,      
           u.email as userEmail,
           
-          -- ✨ إضافة بيانات البنك من الجدول الموحد
-          mbd.account_number, 
-          mbd.iban, 
-          mbd.iban_certificate_url
+          -- ✅ إضافة بيانات البنك من الجدول الموحد bank_details
+          bd.bank_name,
+          bd.account_holder_name,
+          bd.account_number, 
+          bd.iban, 
+          bd.iban_certificate_url
 
       FROM model_payout_requests mpr
       JOIN users u ON mpr.user_id = u.id
-      LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
-      -- WHERE mpr.status = 'pending'
+      -- ✅ الربط مع bank_details بدلاً من merchant_bank_details
+      LEFT JOIN bank_details bd ON u.id = bd.user_id
       ORDER BY mpr.created_at DESC
     `);
 
@@ -1305,18 +1343,23 @@ exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   try {
-    // قمنا بعمل JOIN مع users لجلب اسم الموديل
-    // و LEFT JOIN مع merchant_bank_details لجلب بيانات البنك
-    // (نفترض أن الموديل تستخدم نفس جدول التجار للبيانات البنكية)
+    // ✨ [تحديث] استخدام bank_details بدلاً من merchant_bank_details
     const [details] = await pool.query(
       `SELECT 
-                mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
-                u.name as userName, u.email as userEmail, u.phone_number,
-                mbd.account_number, mbd.iban, mbd.iban_certificate_url, mbd.bank_name 
-             FROM model_payout_requests mpr
-             JOIN users u ON mpr.user_id = u.id
-             LEFT JOIN merchant_bank_details mbd ON u.id = mbd.user_id
-             WHERE mpr.id = ?`,
+          mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
+          u.name as userName, u.email as userEmail, u.phone_number,
+          
+          -- ✅ بيانات البنك من الجدول الموحد
+          bd.bank_name, 
+          bd.account_holder_name,
+          bd.account_number, 
+          bd.iban, 
+          bd.iban_certificate_url 
+
+       FROM model_payout_requests mpr
+       JOIN users u ON mpr.user_id = u.id
+       LEFT JOIN bank_details bd ON u.id = bd.user_id
+       WHERE mpr.id = ?`,
       [id]
     );
 

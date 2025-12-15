@@ -364,19 +364,21 @@ exports.acceptAgreement = asyncHandler(async (req, res) => {
 exports.submitVerification = asyncHandler(async (req, res) => {
   const userId = req.user.id;
 
-  // [2] استقبال جميع البيانات (القديمة + بيانات البنك)
+  // [2] استقبال البيانات (تم إضافة bank_name و account_holder_name)
   const {
     identity_number,
     social_links,
-    stats, // <-- إضافة
-    account_number, // <-- إضافة
-    iban, // <-- إضافة
+    stats,
+    bank_name, // حقل جديد يفضل إرساله من الفرونت إند
+    account_holder_name, // حقل جديد يفضل إرساله من الفرونت إند
+    account_number,
+    iban,
   } = req.body;
 
-  // [3] استخدام req.files (لأننا نتوقع ملفين الآن)
+  // [3] استقبال الملفات
   const files = req.files;
 
-  // [4] التحقق من البيانات الأساسية (مثل كود التاجر)
+  // [4] التحقق من البيانات الأساسية
   if (
     !identity_number ||
     !files ||
@@ -390,30 +392,36 @@ exports.submitVerification = asyncHandler(async (req, res) => {
     );
   }
 
-  // [5] التحقق من الطلبات السابقة (من الكود الأصلي)
-  const [[existingUser]] = await pool.query(
-    "SELECT verification_status FROM users WHERE id = ?",
-    [userId]
-  );
-  if (
-    existingUser.verification_status === "pending" ||
-    existingUser.verification_status === "approved"
-  ) {
-    res.status(400);
-    throw new Error("لديك طلب تحقق بالفعل أو تم التحقق من حسابك.");
-  }
-
-  // [6] تحليل بيانات JSON (من الكود الأصلي)
-  const parsedSocialLinks =
-    typeof social_links === "string" ? JSON.parse(social_links) : social_links;
-  const parsedStats = typeof stats === "string" ? JSON.parse(stats) : stats;
-
-  // [7] بدء المعاملة (Transaction)
-  const connection = await pool.getConnection();
+  // [5] التحقق من الطلبات السابقة
+  const connection = await pool.getConnection(); // نبدأ الاتصال هنا لنستخدمه في التحقق والقراءة
+  
   try {
+    const [[existingUser]] = await connection.query(
+      "SELECT name, verification_status FROM users WHERE id = ?",
+      [userId]
+    );
+
+    if (
+      existingUser.verification_status === "pending" ||
+      existingUser.verification_status === "approved"
+    ) {
+      res.status(400);
+      throw new Error("لديك طلب تحقق بالفعل أو تم التحقق من حسابك.");
+    }
+
+    // [6] تحليل بيانات JSON
+    const parsedSocialLinks =
+      typeof social_links === "string" ? JSON.parse(social_links) : social_links;
+    const parsedStats = typeof stats === "string" ? JSON.parse(stats) : stats;
+
+    // تجهيز بيانات البنك الافتراضية إذا لم يتم إرسالها
+    const finalAccountHolder = account_holder_name || existingUser.name || 'Unknown';
+    const finalBankName = bank_name || 'Bank';
+
+    // [7] بدء المعاملة (Transaction)
     await connection.beginTransaction();
 
-    // [8] الخطوة الأولى: تحديث جدول `users` (الكود الأصلي)
+    // [8] الخطوة الأولى: تحديث جدول `users` (بيانات الهوية والسوشيال)
     await connection.query(
       `UPDATE users SET 
                 identity_number = ?, 
@@ -421,30 +429,36 @@ exports.submitVerification = asyncHandler(async (req, res) => {
                 social_links = ?, 
                 stats = ?, 
                 verification_status = 'pending' 
-             WHERE id = ?`,
+              WHERE id = ?`,
       [
         identity_number,
-        files.identity_image[0].path, // المسار من Cloudinary
+        files.identity_image[0].path,
         JSON.stringify(parsedSocialLinks || {}),
         JSON.stringify(parsedStats || {}),
         userId,
       ]
     );
 
-    // [9] الخطوة الثانية: إضافة/تحديث "الجدول الموحد" `merchant_bank_details`
+    // [9] الخطوة الثانية: إضافة/تحديث الجدول الموحد `bank_details`
     await connection.query(
-      `INSERT INTO merchant_bank_details 
-            (user_id, account_number, iban, iban_certificate_url) 
-           VALUES (?, ?, ?, ?) 
-           ON DUPLICATE KEY UPDATE 
-             account_number = VALUES(account_number), 
-             iban = VALUES(iban), 
-             iban_certificate_url = VALUES(iban_certificate_url)`,
+      `INSERT INTO bank_details 
+             (user_id, bank_name, account_holder_name, account_number, iban, iban_certificate_url, status, is_verified) 
+            VALUES (?, ?, ?, ?, ?, ?, 'approved', 0) 
+            ON DUPLICATE KEY UPDATE 
+              bank_name = VALUES(bank_name),
+              account_holder_name = VALUES(account_holder_name),
+              account_number = VALUES(account_number), 
+              iban = VALUES(iban), 
+              iban_certificate_url = VALUES(iban_certificate_url),
+              status = 'approved',
+              is_verified = 0`,
       [
         userId,
+        finalBankName,       // الحقل الجديد
+        finalAccountHolder,  // الحقل الجديد
         account_number,
         iban,
-        files.iban_certificate[0].path, // المسار من Cloudinary
+        files.iban_certificate[0].path,
       ]
     );
 
@@ -458,7 +472,9 @@ exports.submitVerification = asyncHandler(async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error("Error submitting user verification:", error);
-    res.status(500).json({ message: "فشل في تقديم بيانات التوثيق." });
+    // التحقق من نوع الخطأ لإرسال رسالة مناسبة
+    if (res.statusCode === 200) res.status(500); 
+    if (!res.headersSent) res.json({ message: error.message || "فشل في تقديم بيانات التوثيق." });
   } finally {
     connection.release();
   }

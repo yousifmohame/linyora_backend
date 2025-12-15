@@ -9,6 +9,7 @@ exports.submitVerification = async (req, res) => {
   const { identity_number, business_name, account_number, iban } = req.body;
   const files = req.files;
 
+  // التحقق من الحقول المطلوبة
   if (
     !identity_number ||
     !files.identity_image ||
@@ -25,12 +26,15 @@ exports.submitVerification = async (req, res) => {
   try {
     await connection.beginTransaction();
 
+    // 1. تحديث بيانات المستخدم الأساسية (الهوية والسجل التجاري)
     await connection.query(
       `UPDATE users SET 
-                identity_number = ?, business_name = ?, 
-                identity_image_url = ?, business_license_url = ?, 
-                verification_status = 'pending' 
-             WHERE id = ?`,
+         identity_number = ?, 
+         business_name = ?, 
+         identity_image_url = ?, 
+         business_license_url = ?, 
+         verification_status = 'pending' 
+       WHERE id = ?`,
       [
         identity_number,
         business_name,
@@ -40,14 +44,34 @@ exports.submitVerification = async (req, res) => {
       ]
     );
 
+    // 2. إدخال أو تحديث البيانات البنكية في الجدول الجديد `bank_details`
+    // ملاحظة: الجدول الجديد يتطلب اسم البنك واسم صاحب الحساب.
+    // بما أن هذه البيانات قد لا تكون قادمة من الفرونت إند حالياً، سنضع قيماً مؤقتة أو نستخرجها لاحقاً.
+    // الأفضل هو تحديث الفرونت إند لإرسالها، ولكن لكي يعمل الكود الآن سنضع "غير محدد" أو اسم المستخدم.
+    
+    // جلب اسم المستخدم لاستخدامه كاسم صاحب الحساب افتراضياً
+    const [[user]] = await connection.query("SELECT name FROM users WHERE id = ?", [merchantId]);
+    const accountHolderName = user ? user.name : 'Unknown'; 
+    const bankName = 'Bank'; // قيمة افتراضية حتى يتم تحديث الفرونت إند
+
     await connection.query(
-      `INSERT INTO merchant_bank_details (user_id, account_number, iban, iban_certificate_url) 
-             VALUES (?, ?, ?, ?) 
-             ON DUPLICATE KEY UPDATE 
-                account_number = VALUES(account_number), 
-                iban = VALUES(iban), 
-                iban_certificate_url = VALUES(iban_certificate_url)`,
-      [merchantId, account_number, iban, files.iban_certificate[0].path]
+      `INSERT INTO bank_details 
+       (user_id, bank_name, account_holder_name, account_number, iban, iban_certificate_url, status, is_verified) 
+       VALUES (?, ?, ?, ?, ?, ?, 'approved', 0) 
+       ON DUPLICATE KEY UPDATE 
+         account_number = VALUES(account_number), 
+         iban = VALUES(iban), 
+         iban_certificate_url = VALUES(iban_certificate_url),
+         status = 'approved',
+         is_verified = 1`,
+      [
+        merchantId, 
+        bankName,          // عمود جديد مطلوب
+        accountHolderName, // عمود جديد مطلوب
+        account_number, 
+        iban, 
+        files.iban_certificate[0].path
+      ]
     );
 
     await connection.commit();
