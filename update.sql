@@ -72,3 +72,20 @@ CREATE TABLE flash_sale_products (
     FOREIGN KEY (variant_id) REFERENCES product_variants(id) ON DELETE CASCADE,
     FOREIGN KEY (merchant_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE bank_details (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    bank_name VARCHAR(100) NOT NULL,
+    account_holder_name VARCHAR(100) NOT NULL,
+    iban VARCHAR(34) NOT NULL, -- رقم الآيبان الدولي
+    account_number VARCHAR(50), -- رقم الحساب المحلي (اختياري)
+    iban_certificate_url VARCHAR(500), -- صورة الشهادة
+    is_verified BOOLEAN DEFAULT FALSE, -- حالة التوثيق من الإدارة
+    status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+    rejection_reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_user_bank (user_id) -- حساب بنكي واحد لكل مستخدم
+);
