@@ -72,14 +72,13 @@ const createSubscriptionSession = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Creates a Stripe Checkout session for Products.
+ * @desc    Creates a Stripe Checkout session for Products (SECURE VERSION)
  * @route   POST /api/payments/create-product-checkout
  * @access  Private
  */
 const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
   const stripe = getStripe();
-  const { cartItems, shippingAddressId, shipping_company_id, shipping_cost } =
-    req.body;
+  const { cartItems, shippingAddressId, shipping_company_id, shipping_cost } = req.body;
   const { id: userId, email: userEmail } = req.user;
 
   if (!cartItems || cartItems.length === 0 || !shippingAddressId) {
@@ -89,18 +88,52 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
   }
 
   try {
-    const line_items = cartItems.map((item) => ({
-      price_data: {
-        currency: "sar",
-        product_data: {
-          name: item.name,
-          images: item.image ? [item.image] : [],
-        },
-        unit_amount: Math.round(Number(item.price) * 100),
-      },
-      quantity: item.quantity,
-    }));
+    const line_items = [];
+    const verifiedCartItems = []; // سنخزن هنا العناصر بعد التأكد من أسعارها
 
+    // 1. التكرار عبر عناصر السلة لجلب السعر الحقيقي من قاعدة البيانات
+    for (const item of cartItems) {
+      // نفترض أن item.id هو معرف الـ Variant (الخيار)
+      // ونفترض أن لديك جدول product_variants يحتوي على السعر
+      const [[variant]] = await pool.query(
+        "SELECT id, price, product_id FROM product_variants WHERE id = ?",
+        [item.id] // نستخدم ID القادم من السلة للبحث
+      );
+
+      if (!variant) {
+        throw new Error(`المنتج أو الخيار رقم ${item.id} غير موجود.`);
+      }
+
+      // جلب اسم المنتج للعرض في الفاتورة (اختياري للتحسين)
+      const [[product]] = await pool.query("SELECT name FROM products WHERE id = ?", [variant.product_id]);
+      const productName = product ? product.name : "منتج";
+
+      // تحويل السعر من قاعدة البيانات (ولليس من req.body)
+      const realUnitAmount = Math.round(Number(variant.price) * 100);
+
+      line_items.push({
+        price_data: {
+          currency: "sar",
+          product_data: {
+            name: `${productName} (${item.name || 'خيار'})`, // استخدام الاسم الحقيقي
+            images: item.image ? [item.image] : [],
+          },
+          unit_amount: realUnitAmount, // ✅ السعر الآمن من قاعدة البيانات
+        },
+        quantity: item.quantity,
+      });
+
+      // نضيف العنصر المؤكد للقائمة التي سنحفظها في الميتاداتا
+      verifiedCartItems.push({
+        id: variant.id,
+        productId: variant.product_id,
+        price: variant.price, // السعر الحقيقي
+        quantity: item.quantity,
+        name: productName
+      });
+    }
+
+    // إضافة تكلفة الشحن (يجب أيضاً التحقق منها من قاعدة البيانات إذا كانت ثابتة، لكن سنقبلها الآن)
     if (Number(shipping_cost) > 0) {
       line_items.push({
         price_data: {
@@ -111,16 +144,6 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
         quantity: 1,
       });
     }
-
-    // ✅ FIX: Create a simplified cart with only the essential data
-    // This solves the Stripe 500-character metadata limit error.
-    const simplifiedCartForMetadata = cartItems.map((item) => ({
-      id: item.id, // Variant ID
-      productId: item.productId,
-      name: item.name,
-      price: item.price,
-      quantity: item.quantity,
-    }));
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -133,7 +156,12 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
         shippingAddressId,
         shipping_company_id: shipping_company_id || null,
         shipping_cost: shipping_cost || "0",
-        cartItems: JSON.stringify(simplifiedCartForMetadata), // Use the simplified version
+        // نرسل القائمة التي تم التحقق منها
+        cartItems: JSON.stringify(verifiedCartItems.map(item => ({
+             id: item.id,
+             productId: item.productId,
+             quantity: item.quantity 
+        }))), 
       },
       success_url: `${process.env.FRONTEND_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/checkout/cancel`,
@@ -142,9 +170,10 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
     res.status(200).json({ checkoutUrl: session.url });
   } catch (error) {
     console.error("Stripe product session creation failed:", error);
-    res.status(500).json({ message: "فشل في إنشاء جلسة الدفع." });
+    res.status(500).json({ message: error.message || "فشل في إنشاء جلسة الدفع." });
   }
 });
+
 
 // --- ✨ دالة إنشاء جلسة دفع للاتفاقيات (الكود الذي أضفته صحيح) ---
 

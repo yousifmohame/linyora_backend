@@ -19,8 +19,6 @@ const getCodeExpiration = () => new Date(Date.now() + 10 * 60 * 1000); // 10 min
  * @access  Public
  */
 exports.register = asyncHandler(async (req, res) => {
-  // ... (كود التسجيل الخاص بك يبقى كما هو)
-  // ...
   const { name, email, password, phoneNumber, roleId } = req.body;
 
   if (!name || !email || !password || !roleId) {
@@ -115,48 +113,51 @@ exports.login = asyncHandler(async (req, res) => {
     throw new Error("Please provide email and password.");
   }
 
-  const [[user]] = await pool.query("SELECT * FROM users WHERE email = ?", [
-    email,
-  ]);
+  const [[user]] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
 
   if (!user) {
     res.status(401);
     throw new Error("Invalid credentials.");
   }
 
-  // 1. التأكد أن المستخدم قام بتفعيل حسابه أصلاً
   if (!user.is_email_verified) {
-    res.status(403); // 403 Forbidden
-    throw new Error(
-      "Email not verified. Please check your inbox for a verification code."
-    );
+    res.status(403);
+    throw new Error("Email not verified. Please check your inbox for a verification code.");
   }
 
-  // 2. التحقق من كلمة المرور
   const isMatch = await bcrypt.compare(password, user.password);
   if (!isMatch) {
     res.status(401);
     throw new Error("Invalid credentials.");
   }
 
-  // 3. كلمة المرور صحيحة، الآن نرسل كود التحقق
+  // 🔥 [جديد] منطق فترة التهدئة (Cooldown) لمنع السبام
+  // نتحقق مما إذا كان هناك كود ساري الصلاحية تم إنشاؤه منذ أقل من دقيقة
+  if (user.email_verification_expires && user.email_verification_code) {
+    const timeLeft = new Date(user.email_verification_expires).getTime() - Date.now();
+    const originalDuration = 10 * 60 * 1000; // مدة الصلاحية الأصلية 10 دقائق
+    
+    // إذا كان الفرق بين الصلاحية المتبقية والمدة الأصلية أقل من دقيقة، فهذا يعني أنه تم طلبه للتو
+    if (originalDuration - timeLeft < 60 * 1000) {
+       res.status(429); // Too Many Requests
+       throw new Error("الرجاء الانتظار دقيقة واحدة قبل طلب رمز جديد.");
+    }
+  }
+
   const loginCode = generateVerificationCode();
   const expiration = getCodeExpiration();
 
-  // 4. حفظ الكود المؤقت في قاعدة البيانات (نستخدم نفس أعمدة تفعيل الإيميل)
   await pool.query(
     "UPDATE users SET email_verification_code = ?, email_verification_expires = ? WHERE id = ?",
     [loginCode, expiration, user.id]
   );
 
-  // 5. إرسال الكود عبر الإيميل
   await sendEmail({
     to: email,
     subject: "رمز الدخول - لينيورا",
     html: templates.authVerificationCode(loginCode, "تسجيل الدخول"),
   });
 
-  // 6. إرسال رسالة نجاح للواجهة الأمامية للانتقال للخطوة الثانية
   res.status(200).json({
     success: true,
     message: "Verification code sent to your email. Please check your inbox.",
@@ -226,7 +227,6 @@ exports.verifyLogin = asyncHandler(async (req, res) => {
  * @access  Public
  */
 exports.verifyEmail = asyncHandler(async (req, res) => {
-  // ... (هذه الدالة تبقى كما هي، هي خاصة بالتسجيل)
   const { email, code } = req.body;
 
   if (!email || !code) {
@@ -275,7 +275,6 @@ exports.verifyEmail = asyncHandler(async (req, res) => {
 
 // ... (باقي الدوال: resendVerification, forgotPassword, resetPassword تبقى كما هي)
 exports.resendVerification = asyncHandler(async (req, res) => {
-  // ... (الكود الحالي)
   const { email } = req.body;
 
   if (!email) {
@@ -284,13 +283,24 @@ exports.resendVerification = asyncHandler(async (req, res) => {
   }
 
   const [[user]] = await pool.query(
-    "SELECT id, is_email_verified FROM users WHERE email = ?",
+    "SELECT id, is_email_verified, email_verification_expires, email_verification_code FROM users WHERE email = ?",
     [email]
   );
 
   if (!user || user.is_email_verified) {
     res.status(404);
     throw new Error("User not found or is already verified.");
+  }
+
+  // 🔥 [جديد] التحقق من فترة التهدئة
+  if (user.email_verification_expires && user.email_verification_code) {
+    const timeLeft = new Date(user.email_verification_expires).getTime() - Date.now();
+    const originalDuration = 10 * 60 * 1000;
+    
+    if (originalDuration - timeLeft < 60 * 1000) {
+       res.status(429);
+       throw new Error("تم إرسال رمز بالفعل. الرجاء الانتظار دقيقة قبل إعادة المحاولة.");
+    }
   }
 
   const verificationCode = generateVerificationCode();
@@ -307,9 +317,7 @@ exports.resendVerification = asyncHandler(async (req, res) => {
     html: templates.authVerificationCode(verificationCode, "إعادة إرسال الرمز"),
   });
 
-  res
-    .status(200)
-    .json({ message: "A new verification code has been sent to your email." });
+  res.status(200).json({ message: "A new verification code has been sent to your email." });
 });
 
 exports.forgotPassword = async (req, res) => {

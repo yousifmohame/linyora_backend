@@ -3,13 +3,9 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { cloudinary } = require('../config/cloudinary');
 
-console.log("--- MW: Upload Middleware Initialized ---");
-
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: async (req, file) => {
-    console.log(`--- MW: Processing file: ${file.originalname} | Field: ${file.fieldname} | Type: ${file.mimetype} ---`);
-    
     // 1. تحديد هل الملف فيديو أم لا
     const isVideo = file.fieldname === 'video' || file.mimetype.startsWith('video/');
 
@@ -48,8 +44,6 @@ const storage = new CloudinaryStorage({
         folder = 'linora_platform/documents';
         allowed_formats = ['jpg', 'png', 'jpeg', 'pdf'];
     }
-
-    console.log(`--- MW: Uploading to folder: ${folder} as ${resource_type} ---`);
 
     return {
       folder: folder,

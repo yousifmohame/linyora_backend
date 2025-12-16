@@ -448,11 +448,12 @@ exports.getTopRated = asyncHandler(async (req, res) => {
   res.status(200).json(fullProducts);
 });
 
-// @desc    Get top merchants
 exports.getTopModels = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
-  const currentUserId = req.user ? req.user.id : null; // ✅ معرفة المستخدم الحالي
+  const currentUserId = req.user ? req.user.id : null; 
 
+  // نستخدم عبارة CASE للتحقق الشرطي داخل SQL بدلاً من دمج النصوص
+  // لاحظ استخدام ? مكان المتغيرات
   const query = `
     SELECT 
       u.id, 
@@ -462,12 +463,11 @@ exports.getTopModels = asyncHandler(async (req, res) => {
       (SELECT COUNT(*) FROM user_follows WHERE following_id = u.id) as followers,
       (SELECT COALESCE(AVG(rating), 0) FROM agreement_reviews WHERE reviewee_id = u.id) as rating,
       
-      -- ✅ هل أتابع هذا الشخص؟
-      ${
-        currentUserId
-          ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0`
-          : "FALSE"
-      } as isFollowedByMe
+      -- ✅ إصلاح الاستعلام: التحقق يتم باستخدام Parameters
+      (CASE 
+          WHEN ? IS NOT NULL THEN (SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0
+          ELSE 0 
+      END) as isFollowedByMe
 
     FROM users u
     WHERE u.role_id = 3 
@@ -476,22 +476,23 @@ exports.getTopModels = asyncHandler(async (req, res) => {
     LIMIT ?;
   `;
 
-  // نمرر currentUserId إذا وجد، ثم limit
-  const params = currentUserId ? [currentUserId, limit] : [limit];
+  // الترتيب مهم: currentUserId (للشرط)، currentUserId (للمقارنة)، limit
+  const params = [currentUserId, currentUserId, limit];
+  
   const [models] = await pool.query(query, params);
 
   const formattedModels = models.map((model) => ({
     ...model,
     followers: Number(model.followers),
     rating: Number(model.rating) > 0 ? Number(model.rating).toFixed(1) : "5.0",
-    isFollowedByMe: Boolean(model.isFollowedByMe), // ✅ تحويل لـ Boolean
+    isFollowedByMe: Boolean(model.isFollowedByMe), 
   }));
 
   res.status(200).json(formattedModels);
 });
 
 // @desc    Get top merchants
-// @route   GET /api/browse/top-merchants
+
 exports.getTopMerchants = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const currentUserId = req.user ? req.user.id : null;
@@ -511,12 +512,11 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
         WHERE p.merchant_id = u.id
       ) as rating,
 
-      -- ✅ هل أتابع هذا التاجر؟
-      ${
-        currentUserId
-          ? `(SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0`
-          : "FALSE"
-      } as isFollowedByMe
+      -- ✅ إصلاح الاستعلام
+      (CASE 
+          WHEN ? IS NOT NULL THEN (SELECT COUNT(*) FROM user_follows WHERE follower_id = ? AND following_id = u.id) > 0
+          ELSE 0 
+      END) as isFollowedByMe
 
     FROM users u
     WHERE u.role_id = 2
@@ -525,15 +525,14 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
     LIMIT ?;
   `;
 
-  const params = currentUserId ? [currentUserId, limit] : [limit];
+  const params = [currentUserId, currentUserId, limit];
   const [merchants] = await pool.query(query, params);
 
   const formattedMerchants = merchants.map((merchant) => ({
     ...merchant,
     followers: Number(merchant.followers),
-    rating:
-      Number(merchant.rating) > 0 ? Number(merchant.rating).toFixed(1) : "New",
-    isFollowedByMe: Boolean(merchant.isFollowedByMe), // ✅ تحويل لـ Boolean
+    rating: Number(merchant.rating) > 0 ? Number(merchant.rating).toFixed(1) : "New",
+    isFollowedByMe: Boolean(merchant.isFollowedByMe),
   }));
 
   res.status(200).json(formattedMerchants);

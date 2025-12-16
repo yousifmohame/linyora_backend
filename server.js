@@ -1,5 +1,6 @@
 // server.js
 const express = require("express");
+const rateLimit = require('express-rate-limit');
 const { createServer } = require('http');
 const { Server } = require("socket.io");
 const cors = require("cors");
@@ -65,6 +66,16 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1000mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 دقيقة
+  max: 20, // الحد الأقصى للطلبات من نفس الـ IP
+  message: { 
+    message: "تم تجاوز الحد المسموح لمحاولات الدخول. الرجاء المحاولة مرة أخرى بعد 15 دقيقة." 
+  },
+  standardHeaders: true, // يرسل معلومات الحد في الـ Headers
+  legacyHeaders: false,
+});
+
 // رسالة اختبارية
 app.get("/", (req, res) => {
   res.send("Linora Platform API is running... ✨");
@@ -72,7 +83,7 @@ app.get("/", (req, res) => {
 
 // --- All API Routes ---
 const authRoutes = require("./routes/auth");
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
 const userRoutes = require("./routes/userRoutes");
 app.use("/api/users", userRoutes);
 const merchantRoutes = require("./routes/merchantRoutes");
