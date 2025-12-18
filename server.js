@@ -57,7 +57,7 @@ app.post('/api/payments/webhook', express.raw({type: 'application/json'}), payme
 
 // Middlewares
 const corsOptions = {
-  origin: ['http://localhost:3000', 'https://linyora.com'], // حدد هنا نطاق الواجهة الأمامية الخاص بك
+  origin: ['http://localhost:3000', 'https://linyora.com', 'https://www.linyora.com'], // حدد هنا نطاق الواجهة الأمامية الخاص بك
   optionsSuccessStatus: 200 // لبعض المتصفحات القديمة
 };
 
