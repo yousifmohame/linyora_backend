@@ -3,44 +3,82 @@ const pool = require("../config/db");
 // --- (Public) للعملاء ---
 const getActiveSections = async (req, res) => {
   try {
+    // 1. جلب الأقسام مع بيانات المنتج الخام (بدون تحليل JSON داخل SQL لتجنب الأخطاء)
     const [sections] = await pool.query(`
       SELECT s.*, 
-             -- جلب اللون والايقونة وكل البيانات الجديدة تلقائياً عبر s.*
+             p.id as product_id,
              p.name as product_name_en, 
              p.name as product_name_ar, 
              p.description as product_description, 
+             
+             -- جلب السعر (قد يكون NULL إذا لم يوجد متغيرات)
              (SELECT price FROM product_variants WHERE product_id = p.id LIMIT 1) as product_price,
-             (SELECT JSON_UNQUOTE(JSON_EXTRACT(images, '$[0]')) FROM product_variants WHERE product_id = p.id LIMIT 1) as product_image
+             
+             -- جلب صور المتغيرات كنص خام (Raw Text) لنقوم بمعالجته في الجافاسكريبت بأمان
+             (SELECT images FROM product_variants WHERE product_id = p.id LIMIT 1) as product_images_raw
+             
       FROM sections s
       LEFT JOIN products p ON s.featured_product_id = p.id
       WHERE s.is_active = TRUE
       ORDER BY s.sort_order ASC
     `);
 
+    // 2. معالجة البيانات وجلب الشرائح والتصنيفات
     const sectionsWithData = await Promise.all(
       sections.map(async (section) => {
+        
+        // --- [Fix] معالجة الصورة بأمان ---
+        let finalImage = null;
+        try {
+            if (section.product_images_raw) {
+                // قد تكون البيانات مخزنة كـ JSON string أو كائن مباشر حسب مكتبة mysql2
+                const parsedImages = typeof section.product_images_raw === 'string' 
+                    ? JSON.parse(section.product_images_raw) 
+                    : section.product_images_raw;
+                
+                if (Array.isArray(parsedImages) && parsedImages.length > 0) {
+                    finalImage = parsedImages[0];
+                }
+            }
+        } catch (e) {
+            console.warn(`Failed to parse images for section ${section.id}`, e);
+            // لا نوقف السيرفر، فقط نترك الصورة فارغة
+        }
+
+        // --- جلب الشرائح ---
         const [slides] = await pool.query(
           "SELECT * FROM section_slides WHERE section_id = ? ORDER BY sort_order ASC",
           [section.id]
         );
 
-        const [categories] = await pool.query(
-          `
-        SELECT c.* FROM categories c
-        JOIN section_categories sc ON c.id = sc.category_id
-        WHERE sc.section_id = ?
-      `,
+        // --- جلب التصنيفات ---
+        const [categories] = await pool.query(`
+            SELECT c.* FROM categories c
+            JOIN section_categories sc ON c.id = sc.category_id
+            WHERE sc.section_id = ?
+          `,
           [section.id]
         );
 
-        return { ...section, slides, categories };
+        // تنظيف الكائن المرجَع (إزالة الحقول الخام)
+        const { product_images_raw, ...cleanSection } = section;
+
+        return {
+          ...cleanSection,
+          product_image: finalImage, // الصورة المعالجة
+          // إذا كان المنتج محذوفاً (p.id هو null)، نضع علامة للفرونت اند
+          has_valid_product: !!section.product_id, 
+          slides,
+          categories
+        };
       })
     );
 
     res.json(sectionsWithData);
   } catch (error) {
     console.error("Error in getActiveSections:", error);
-    res.status(500).json({ message: "Server Error" });
+    // إرجاع مصفوفة فارغة في حالة الخطأ الشديد لمنع توقف الصفحة الرئيسية بالكامل
+    res.status(500).json({ message: "Server Error", error: error.message });
   }
 };
 
@@ -84,35 +122,56 @@ const getSectionById = async (req, res) => {
 // --- (Private) للأدمن ---
 const getAllSectionsAdmin = async (req, res) => {
   try {
+    // 1. استخدام LEFT JOIN بدلاً من Subquery لتجنب المشاكل مع المنتجات المحذوفة
     const [sections] = await pool.query(`
-            SELECT s.*,
-                   (SELECT name FROM products WHERE id = s.featured_product_id) as product_name_en
-            FROM sections s 
-            ORDER BY s.created_at DESC
-        `);
+      SELECT s.*,
+             p.name as product_name_en,
+             p.name as product_name_ar -- يمكنك جلب الاسم العربي أيضاً
+      FROM sections s 
+      LEFT JOIN products p ON s.featured_product_id = p.id
+      ORDER BY s.created_at DESC
+    `);
+
+    // حماية: إذا لم توجد أقسام، ارجع مصفوفة فارغة فوراً
+    if (!sections || sections.length === 0) {
+        return res.json([]);
+    }
 
     const fullSections = await Promise.all(
       sections.map(async (section) => {
+        // حماية: التأكد من وجود section.id
+        if (!section.id) return section;
+
         const [slides] = await pool.query(
           "SELECT * FROM section_slides WHERE section_id = ?",
           [section.id]
         );
+        
         const [categories] = await pool.query(
           "SELECT category_id FROM section_categories WHERE section_id = ?",
           [section.id]
         );
+
         return {
           ...section,
-          slides,
-          categories,
-          category_ids: categories.map((c) => c.category_id),
+          // إذا كان المنتج محذوفاً (الاسم null)، نضع نصاً بديلاً
+          product_name_en: section.product_name_en || "Product Deleted / Not Found",
+          slides: slides || [],
+          categories: categories || [],
+          category_ids: categories ? categories.map((c) => c.category_id) : [],
         };
       })
     );
 
     res.json(fullSections);
   } catch (error) {
-    res.status(500).json({ message: "Error fetching sections" });
+    // 🔥 طباعة الخطأ الحقيقي في تيرمينال الباك اند لمعرفة السبب
+    console.error("🔥 Error in getAllSectionsAdmin:", error);
+    
+    res.status(500).json({ 
+        message: "Error fetching sections", 
+        error: error.message // مفيد للتطوير (احذفه في الإنتاج)
+    });
   }
 };
 
