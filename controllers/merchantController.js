@@ -338,133 +338,126 @@ exports.getMerchantProducts = asyncHandler(async (req, res) => {
 exports.updateProduct = asyncHandler(async (req, res) => {
   const { id: productId } = req.params;
   const merchantId = req.user.id;
-  const { name, brand, description, variants, categoryIds } = req.body;
+
+  // استقبال البيانات
+  const { name, brand, description, variants } = req.body;
+
+  // ✅ 1. استخراج categoryIds بذكاء (يقبل الصيغتين لتجنب المشاكل)
+  // هذا المصفوفة ستحتوي على أرقام التصنيفات (الرئيسية والفرعية) التي اختارها المستخدم
+  const categoryIds = req.body.categoryIds || req.body.category_ids || [];
 
   console.log("[DEBUG] Updating product:", { productId, merchantId });
-  console.log(
-    "[DEBUG] Request body - name:",
-    name,
-    "brand:",
-    brand,
-    "description length:",
-    description?.length
-  );
-  console.log("[DEBUG] Variants count:", variants?.length || 0);
-  console.log("[DEBUG] Category IDs:", categoryIds);
+  console.log("[DEBUG] Category IDs to save:", categoryIds);
 
   const connection = await pool.getConnection();
+  
   try {
     await connection.beginTransaction();
 
-    // 1. Verify the product belongs to the merchant
+    // 1. التحقق من ملكية المنتج
     const [[productCheck]] = await connection.query(
       "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
       [productId, merchantId]
     );
+
     if (!productCheck) {
-      console.log("[DEBUG] Product not found or unauthorized access attempt.");
       await connection.rollback();
       return res.status(404).json({
         message: "Product not found or you do not have permission to edit it.",
       });
     }
 
-    // 2. Check if this is a dropshipping product
+    // 2. التحقق مما إذا كان المنتج دروب شيبينغ (Dropshipping)
     const [links] = await connection.query(
       `SELECT dl.id FROM dropship_links dl
-             JOIN product_variants pv ON dl.merchant_variant_id = pv.id
-             WHERE pv.product_id = ?`,
+       JOIN product_variants pv ON dl.merchant_variant_id = pv.id
+       WHERE pv.product_id = ?`,
       [productId]
     );
     const isDropshippingProduct = links.length > 0;
-    console.log("[DEBUG] Is dropshipping product?", isDropshippingProduct);
 
+    // ---------------------------------------------------------
+    // مسار تحديث منتج الدروب شيبينغ (تحديث محدود)
+    // ---------------------------------------------------------
     if (isDropshippingProduct) {
-      console.log(
-        "[DEBUG] Processing as DROP-SHIPPING product (limited update)"
-      );
+      console.log("[DEBUG] Processing as DROP-SHIPPING product");
 
-      // a) Update main product details
+      // تحديث البيانات الأساسية المسموح بها فقط
       await connection.query(
         "UPDATE products SET name = ?, brand = ?, description = ? WHERE id = ?",
         [name, brand, description, productId]
       );
 
-      // b) Update only price & compare_at_price for variants
-      if (variants && Array.isArray(variants) && variants.length > 0) {
+      // تحديث السعر فقط للمتغيرات
+      if (variants && Array.isArray(variants)) {
         for (const variant of variants) {
-          if (
-            variant.id &&
-            (variant.price !== undefined ||
-              variant.compare_at_price !== undefined)
-          ) {
-            console.log(
-              `[DEBUG] Updating dropship variant ID ${variant.id}: price=${variant.price}, compare_at_price=${variant.compare_at_price}`
-            );
+          // نتأكد أن المتغير موجود فعلاً (id موجب)
+          if (variant.id && Number(variant.id) > 0 && variant.price !== undefined) {
             await connection.query(
               "UPDATE product_variants SET price = ?, compare_at_price = ? WHERE id = ? AND product_id = ?",
               [
                 variant.price,
-                variant.compare_at_price !== undefined
-                  ? variant.compare_at_price
-                  : null,
+                variant.compare_at_price || null,
                 variant.id,
                 productId,
               ]
             );
-          } else {
-            console.log(
-              `[DEBUG] Skipping variant ${variant.id} — no price or compare_at_price provided.`
-            );
           }
         }
-      } else {
-        console.log(
-          "[DEBUG] No variants provided for dropshipping product update."
-        );
       }
+      
+      // ملاحظة: عادة لا يتم تغيير تصنيفات منتجات الدروب شيبينغ لأنها تأتي من المورد، 
+      // لكن إذا أردت السماح بذلك، يمكنك إضافة كود تحديث التصنيفات هنا مثل القسم في الأسفل.
 
       await connection.commit();
-      console.log("[DEBUG] Dropshipping product updated successfully.");
-      res
-        .status(200)
-        .json({ message: "Dropshipping product updated successfully." });
-    } else {
-      console.log(
-        "[DEBUG] Processing as REGULAR merchant product (full update)"
-      );
+      return res.status(200).json({ message: "Dropshipping product updated successfully." });
 
-      // a) Update main product details
+    } 
+    
+    // ---------------------------------------------------------
+    // مسار تحديث المنتج العادي (تحديث كامل)
+    // ---------------------------------------------------------
+    else {
+      console.log("[DEBUG] Processing as REGULAR merchant product");
+
+      // أ) تحديث تفاصيل المنتج الرئيسية
       await connection.query(
         "UPDATE products SET name = ?, brand = ?, description = ? WHERE id = ?",
         [name, brand, description, productId]
       );
 
-      // b) Full variant sync
+      // ب) تحديث المتغيرات (Variants Sync)
+      
+      // 1. جلب المتغيرات الموجودة حالياً في قاعدة البيانات
       const [existingVariants] = await connection.query(
         "SELECT id FROM product_variants WHERE product_id = ?",
         [productId]
       );
       const existingVariantIds = existingVariants.map((v) => v.id);
-      const submittedVariantIds = variants.map((v) => v.id).filter(Boolean);
 
-      console.log("[DEBUG] Existing variant IDs:", existingVariantIds);
-      console.log("[DEBUG] Submitted variant IDs:", submittedVariantIds);
+      // 2. تحديد المتغيرات القادمة التي لها ID حقيقي (موجب)
+      const submittedExistingIds = variants
+        .map((v) => Number(v.id))
+        .filter((id) => id && id > 0);
 
+      // 3. حذف المتغيرات التي لم تعد موجودة في الطلب
       const variantsToDelete = existingVariantIds.filter(
-        (id) => !submittedVariantIds.includes(id)
+        (id) => !submittedExistingIds.includes(id)
       );
+
       if (variantsToDelete.length > 0) {
-        console.log("[DEBUG] Deleting variants:", variantsToDelete);
+        console.log("[DEBUG] Deleting removed variants:", variantsToDelete);
         await connection.query("DELETE FROM product_variants WHERE id IN (?)", [
           variantsToDelete,
         ]);
       }
 
+      // 4. إما تحديث المتغيرات الموجودة أو إضافة الجديدة
       for (const variant of variants) {
         const imagesJSON = JSON.stringify(variant.images || []);
-        if (variant.id) {
-          console.log(`[DEBUG] Updating existing variant ${variant.id}`);
+        
+        // إذا كان المتغير له ID وموجب > 0، فهو تحديث
+        if (variant.id && Number(variant.id) > 0) {
           await connection.query(
             "UPDATE product_variants SET color = ?, price = ?, compare_at_price = ?, stock_quantity = ?, sku = ?, images = ? WHERE id = ?",
             [
@@ -478,7 +471,7 @@ exports.updateProduct = asyncHandler(async (req, res) => {
             ]
           );
         } else {
-          console.log("[DEBUG] Inserting new variant");
+          // إذا كان ID سالب (مؤقت) أو غير موجود، فهو إضافة جديدة
           await connection.query(
             "INSERT INTO product_variants (product_id, color, price, compare_at_price, stock_quantity, sku, images) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
@@ -494,31 +487,41 @@ exports.updateProduct = asyncHandler(async (req, res) => {
         }
       }
 
-      // c) Category sync
+      // ج) تحديث التصنيفات (Categories Sync)
+      // ✅ التعامل مع التصنيفات الرئيسية والفرعية:
+      // ببساطة نقوم بحذف كل الروابط القديمة وإعادة إدخال القائمة الجديدة المختارة.
+      
       console.log("[DEBUG] Syncing categories...");
+      
+      // 1. حذف الروابط القديمة
       await connection.query(
         "DELETE FROM product_categories WHERE product_id = ?",
         [productId]
       );
-      if (categoryIds && categoryIds.length > 0) {
+
+      // 2. إضافة الروابط الجديدة (إذا وجدت)
+      if (Array.isArray(categoryIds) && categoryIds.length > 0) {
+        // تحضير البيانات للإدخال المتعدد (Bulk Insert)
         const categoryValues = categoryIds.map((catId) => [productId, catId]);
-        console.log("[DEBUG] Inserting category associations:", categoryValues);
-        await connection.query(
-          "INSERT INTO product_categories (product_id, category_id) VALUES ?",
-          [categoryValues]
-        );
+        
+        if (categoryValues.length > 0) {
+            await connection.query(
+            "INSERT INTO product_categories (product_id, category_id) VALUES ?",
+            [categoryValues]
+            );
+        }
       }
 
       await connection.commit();
-      console.log("[DEBUG] Regular product updated successfully.");
+      console.log("[DEBUG] Product updated successfully.");
       res.status(200).json({ message: "Product updated successfully." });
     }
+
   } catch (error) {
     await connection.rollback();
     console.error("[ERROR] Failed to update product:", error);
-    res.status(500).json({ message: "Failed to update product." });
+    res.status(500).json({ message: "Failed to update product.", details: error.message });
   } finally {
-    console.log("[DEBUG] Releasing database connection.");
     connection.release();
   }
 });
