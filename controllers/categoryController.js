@@ -198,19 +198,17 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Category not found" });
   }
 
-  // 2. جلب التصنيفات الفرعية المباشرة (للعرض في السلايدر)
+  // 2. جلب التصنيفات الفرعية المباشرة
   const [subcategories] = await pool.query(
     "SELECT id, name, slug, image_url FROM categories WHERE parent_id = ?",
     [category.id]
   );
 
-  // 3. ✨ الخطوة الجديدة: جلب المنتجات من القسم الحالي + الأقسام الفرعية
-  // نجلب هيكل الأقسام بالكامل لتحديد الأبناء
+  // 3. جلب المنتجات من القسم الحالي + الأقسام الفرعية
   const [allCategories] = await pool.query("SELECT id, parent_id FROM categories");
   const targetCategoryIds = getAllDescendantIds(allCategories, category.id);
 
-  // 4. جلب المنتجات (تم حذف p.price لتجنب الخطأ)
-  // لاحظ: pc.category_id IN (?)
+  // 4. جلب المنتجات (تم حذف p.price و p.image_url)
   const [products] = await pool.query(
     `
         SELECT 
@@ -221,12 +219,11 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
             p.status, 
             p.merchant_id, 
             u.store_name as merchantName,
-            -- ❌ تم حذف p.price من هنا لأنه غير موجود في الجدول
-            p.image_url as image,
+            
+            -- ❌ تم حذف p.price و p.image_url لأنها غير موجودة
             (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
             (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
 
-            -- بيانات المورد
             MAX(sp.supplier_id) as supplier_id,
             MAX(sup_u.name) as supplier_name,
             (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
@@ -241,13 +238,12 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
         LEFT JOIN supplier_products sp ON spv.product_id = sp.id
         LEFT JOIN users sup_u ON sp.supplier_id = sup_u.id
 
-        -- ✨ البحث في القسم الحالي وكل أبنائه
         WHERE p.status = 'active' AND pc.category_id IN (?)
         
         GROUP BY p.id
         ORDER BY p.created_at DESC
     `,
-    [targetCategoryIds] // تمرير مصفوفة الـ IDs
+    [targetCategoryIds]
   );
 
   if (products.length === 0) {
@@ -258,7 +254,7 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     });
   }
 
-  // 5. جلب المتغيرات (Variants) للحصول على السعر منها
+  // 5. جلب المتغيرات (Variants) للصور والأسعار
   const productIds = products.map((p) => p.id);
   let variants = [];
 
@@ -286,34 +282,35 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     variantsMap.set(variant.product_id, items);
   });
 
-  // 6. دمج البيانات وإضافة السعر من المتغيرات
+  // 6. دمج البيانات
   const productsWithData = products
     .map((product) => {
       const productVariants = variantsMap.get(product.id) || [];
 
-      // ✅ استخراج السعر من أول متغير (لأن الجدول الرئيسي لا يحتوي عليه)
+      // ✅ استخراج السعر والصورة من أول متغير (Variant)
       let displayPrice = 0;
-      if (productVariants.length > 0) {
-        displayPrice = productVariants[0].price; 
-      }
+      let displayImage = ""; // صورة افتراضية فارغة
 
-      // ✅ استخراج الصورة من أول متغير إذا لم تكن موجودة في المنتج
-      let displayImage = product.image;
-      if (!displayImage && productVariants.length > 0 && productVariants[0].images?.length > 0) {
-         displayImage = productVariants[0].images[0];
+      if (productVariants.length > 0) {
+        displayPrice = productVariants[0].price;
+        
+        // جلب أول صورة من مصفوفة الصور للمتغير الأول
+        if (productVariants[0].images && productVariants[0].images.length > 0) {
+            displayImage = productVariants[0].images[0];
+        }
       }
 
       return {
         ...product,
-        price: displayPrice, // إضافة السعر هنا للفرونت إند
-        image: displayImage, // التأكد من وجود صورة
+        price: displayPrice,  // إرسال السعر للفرونت إند
+        image: displayImage,  // إرسال الصورة للفرونت إند
         is_dropshipping: !!product.is_dropshipping,
         variants: productVariants,
         rating: parseFloat(product.rating) || 0,
         reviewCount: parseInt(product.reviewCount, 10) || 0,
       };
     })
-    .filter((p) => p.variants.length > 0); // (اختياري) إخفاء المنتجات التي ليس لها متغيرات
+    .filter((p) => p.variants.length > 0); // إخفاء المنتجات التي ليس لها متغيرات
 
   res.status(200).json({
     products: productsWithData,
