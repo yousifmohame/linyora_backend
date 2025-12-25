@@ -185,11 +185,6 @@ const getAllDescendantIds = (allCategories, parentId) => {
   return ids;
 };
 
-/**
- * @desc    Get category details and products by category slug (Main + Subcategories)
- * @route   GET /api/browse/categories/:slug
- * @access  Public
- */
 exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
   const { slug } = req.params;
 
@@ -203,20 +198,19 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Category not found" });
   }
 
-  // 2. جلب التصنيفات الفرعية المباشرة (للعرض في السلايدر العلوي)
+  // 2. جلب التصنيفات الفرعية المباشرة (للعرض في السلايدر)
   const [subcategories] = await pool.query(
     "SELECT id, name, slug, image_url FROM categories WHERE parent_id = ?",
     [category.id]
   );
 
-  // 3. ✨ الخطوة الجديدة: تحديد كل الأقسام التابعة (الأبناء والأحفاد)
-  // نجلب فقط المعرفات والعلاقات لتخفيف الحمل
+  // 3. ✨ الخطوة الجديدة: جلب المنتجات من القسم الحالي + الأقسام الفرعية
+  // نجلب هيكل الأقسام بالكامل لتحديد الأبناء
   const [allCategories] = await pool.query("SELECT id, parent_id FROM categories");
-  
-  // نستخدم الدالة المساعدة لجمع كل الـ IDs
   const targetCategoryIds = getAllDescendantIds(allCategories, category.id);
 
-  // 4. جلب المنتجات (تم التعديل لاستخدام IN بدلاً من =)
+  // 4. جلب المنتجات (تم حذف p.price لتجنب الخطأ)
+  // لاحظ: pc.category_id IN (?)
   const [products] = await pool.query(
     `
         SELECT 
@@ -227,12 +221,12 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
             p.status, 
             p.merchant_id, 
             u.store_name as merchantName,
-            p.price, -- تأكد من وجود السعر
+            -- ❌ تم حذف p.price من هنا لأنه غير موجود في الجدول
             p.image_url as image,
             (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
             (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
 
-            -- بيانات المورد والدروبشيبينغ
+            -- بيانات المورد
             MAX(sp.supplier_id) as supplier_id,
             MAX(sup_u.name) as supplier_name,
             (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
@@ -241,23 +235,21 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
         JOIN users u ON p.merchant_id = u.id
         JOIN product_categories pc ON p.id = pc.product_id
         
-        -- الربط مع جداول الدروبشيبينغ
         LEFT JOIN product_variants pv ON p.id = pv.product_id
         LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
         LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
         LEFT JOIN supplier_products sp ON spv.product_id = sp.id
         LEFT JOIN users sup_u ON sp.supplier_id = sup_u.id
 
-        -- ✨ التغيير الجوهري هنا: البحث في القائمة الكاملة للأقسام
+        -- ✨ البحث في القسم الحالي وكل أبنائه
         WHERE p.status = 'active' AND pc.category_id IN (?)
         
         GROUP BY p.id
         ORDER BY p.created_at DESC
     `,
-    [targetCategoryIds] // نمرر مصفوفة الـ IDs كاملة
+    [targetCategoryIds] // تمرير مصفوفة الـ IDs
   );
 
-  // إذا لم توجد منتجات، نعيد مصفوفة فارغة ولكن مع بيانات القسم
   if (products.length === 0) {
     return res.status(200).json({
       products: [],
@@ -266,7 +258,7 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     });
   }
 
-  // 5. جلب المتغيرات (Variants) للمنتجات التي وجدناها
+  // 5. جلب المتغيرات (Variants) للحصول على السعر منها
   const productIds = products.map((p) => p.id);
   let variants = [];
 
@@ -278,7 +270,6 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     variants = rows;
   }
 
-  // تنظيم المتغيرات في Map لسهولة الوصول
   const variantsMap = new Map();
   variants.forEach((variant) => {
     try {
@@ -295,27 +286,34 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     variantsMap.set(variant.product_id, items);
   });
 
-  // 6. دمج البيانات وتنسيق الاستجابة
+  // 6. دمج البيانات وإضافة السعر من المتغيرات
   const productsWithData = products
     .map((product) => {
       const productVariants = variantsMap.get(product.id) || [];
 
-      // منطق اختياري: استخدام صورة المتغير الأول إذا لم تكن صورة المنتج موجودة
-      /*
-      if (!product.image && productVariants.length > 0 && productVariants[0].images?.length > 0) {
-          product.image = productVariants[0].images[0];
+      // ✅ استخراج السعر من أول متغير (لأن الجدول الرئيسي لا يحتوي عليه)
+      let displayPrice = 0;
+      if (productVariants.length > 0) {
+        displayPrice = productVariants[0].price; 
       }
-      */
+
+      // ✅ استخراج الصورة من أول متغير إذا لم تكن موجودة في المنتج
+      let displayImage = product.image;
+      if (!displayImage && productVariants.length > 0 && productVariants[0].images?.length > 0) {
+         displayImage = productVariants[0].images[0];
+      }
 
       return {
         ...product,
+        price: displayPrice, // إضافة السعر هنا للفرونت إند
+        image: displayImage, // التأكد من وجود صورة
         is_dropshipping: !!product.is_dropshipping,
         variants: productVariants,
         rating: parseFloat(product.rating) || 0,
         reviewCount: parseInt(product.reviewCount, 10) || 0,
       };
     })
-    .filter((p) => p.variants.length > 0); // (اختياري) إخفاء المنتجات التي نفذت كمياتها
+    .filter((p) => p.variants.length > 0); // (اختياري) إخفاء المنتجات التي ليس لها متغيرات
 
   res.status(200).json({
     products: productsWithData,
