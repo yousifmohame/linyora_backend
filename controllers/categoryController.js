@@ -296,3 +296,126 @@ exports.getProductsByCategorySlug = asyncHandler(async (req, res) => {
     subcategories: subcategories || [],
   });
 });
+
+
+// ... (باقي الاستيرادات والدوال في الأعلى)
+
+// دالة مساعدة (Helper) لإيجاد كل الأبناء والأحفاد (Recursive)
+// نضعها خارج الـ exports أو في ملف utils
+const getAllDescendantIds = (categories, parentId) => {
+    let ids = [parentId];
+    const children = categories.filter(c => c.parent_id === parentId);
+    
+    for (const child of children) {
+        ids = [...ids, ...getAllDescendantIds(categories, child.id)];
+    }
+    return ids;
+};
+
+exports.getProductsByCategorySlugd = asyncHandler(async (req, res) => {
+  const { slug } = req.params;
+
+  // 1. جلب القسم الرئيسي
+  const [[category]] = await pool.query(
+    "SELECT id, name FROM categories WHERE slug = ?",
+    [slug]
+  );
+
+  if (!category) {
+    return res.status(404).json({ message: "Category not found" });
+  }
+
+  // 2. جلب الأقسام الفرعية المباشرة (للعرض في السلايدر العلوي)
+  const [subcategories] = await pool.query(
+    "SELECT id, name, slug, image_url FROM categories WHERE parent_id = ?",
+    [category.id]
+  );
+
+  // 3. ✨ السحر هنا: جلب كل الـ IDs (القسم الحالي + كل الأبناء والأحفاد)
+  // نجلب كل الفئات أولاً (خفيف جداً على الداتا بيس) لعمل الحسابات في الذاكرة
+  const [allCategories] = await pool.query("SELECT id, parent_id FROM categories");
+  const targetCategoryIds = getAllDescendantIds(allCategories, category.id);
+
+  // 4. جلب المنتجات (تم التعديل لاستخدام IN بدلاً من =)
+  // لاحظ: pc.category_id IN (?)
+  const [products] = await pool.query(
+    `
+        SELECT 
+            p.id, 
+            p.name, 
+            p.description, 
+            p.brand, 
+            p.status, 
+            p.merchant_id,
+            u.store_name as merchantName,
+            p.price, -- تأكد من جلب السعر
+            p.image_url as image, -- أو حسب اسم العمود عندك
+            (SELECT AVG(rating) FROM product_reviews WHERE product_id = p.id) as rating,
+            (SELECT COUNT(*) FROM product_reviews WHERE product_id = p.id) as reviewCount,
+
+            MAX(sp.supplier_id) as supplier_id,
+            MAX(sup_u.name) as supplier_name,
+            (MAX(sp.supplier_id) IS NOT NULL) as is_dropshipping
+
+        FROM products p
+        JOIN users u ON p.merchant_id = u.id
+        JOIN product_categories pc ON p.id = pc.product_id
+        
+        LEFT JOIN product_variants pv ON p.id = pv.product_id
+        LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+        LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+        LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+        LEFT JOIN users sup_u ON sp.supplier_id = sup_u.id
+
+        WHERE p.status = 'active' AND pc.category_id IN (?) 
+        GROUP BY p.id
+        ORDER BY p.created_at DESC
+    `,
+    [targetCategoryIds] // نمرر مصفوفة الـ IDs هنا
+  );
+
+  // ... (باقي كود معالجة الصور والمتغيرات Variants كما هو في كودك الأصلي)
+  
+  // (اختصاراً سأضع كود المعالجة البسيط هنا، يمكنك نسخ المنطق المعقد من كودك السابق)
+  const productIds = products.map((p) => p.id);
+  let variants = [];
+  if (productIds.length > 0) {
+    const [rows] = await pool.query(
+      "SELECT * FROM product_variants WHERE product_id IN (?) AND stock_quantity > 0",
+      [productIds]
+    );
+    variants = rows;
+  }
+
+  const variantsMap = new Map();
+  variants.forEach((variant) => {
+      // ... معالجة الصور ...
+      const items = variantsMap.get(variant.product_id) || [];
+      items.push(variant);
+      variantsMap.set(variant.product_id, items);
+  });
+
+  const productsWithData = products.map((product) => {
+      const productVariants = variantsMap.get(product.id) || [];
+      // استخدام أول صورة من المتغيرات إذا لم تكن صورة المنتج موجودة
+      let displayImage = product.image;
+      if (!displayImage && productVariants.length > 0 && productVariants[0].images) {
+          // منطق استخراج الصورة
+      }
+
+      return {
+        ...product,
+        is_dropshipping: !!product.is_dropshipping,
+        variants: productVariants,
+        rating: parseFloat(product.rating) || 0,
+        reviewCount: parseInt(product.reviewCount, 10) || 0,
+      };
+    })
+    .filter((p) => p.variants.length > 0); // إخفاء المنتجات التي ليس لها مخزون
+
+  res.status(200).json({
+    products: productsWithData,
+    categoryName: category.name,
+    subcategories: subcategories || [],
+  });
+});

@@ -13,7 +13,7 @@ router.post('/', protect, upload.single('image'), categoryController.createCateg
 router.put('/:id', protect, upload.single('image'), categoryController.updateCategory); // <-- 3. إضافة middleware هنا
 router.delete('/:id', protect, categoryController.deleteCategory);
 
-router.get('/:slug/products', categoryController.getProductsByCategorySlug);
+router.get('/:slug/products', categoryController.getProductsByCategorySlugd);
 
 
 module.exports = router;
