@@ -141,7 +141,9 @@ app.use('/api/stories', storyRoutes);
 const flashSaleRoutes = require('./routes/flashSaleRoutes');
 app.use('/api/flash-sale', flashSaleRoutes);
 const bankRoutes = require('./routes/bankRoutes');
-app.use('/api/bank', bankRoutes)
+app.use('/api/bank', bankRoutes);
+const layoutRoutes = require('./routes/layoutRoutes'); // <--- أضف هذا
+app.use('/api/layout', layoutRoutes); // <--- أضف هذا
 
 // --- Socket.IO Connection Management ---
 const userSocketMap = {};
