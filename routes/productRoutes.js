@@ -12,7 +12,6 @@ const {
   getModelPromotableProducts,
 } = require("../controllers/productController");
 
-const { protect } = require("../middleware/authMiddleware");
 
 router.get("/", getAllProducts);
 router.get("/promoted", getPromotedProducts);
