@@ -116,6 +116,7 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
         s.status, 
         s.start_date,
         s.end_date, 
+        sp.id AS plan_id,
         sp.name AS plan_name,
         sp.description AS plan_description,
         sp.price AS plan_price,
@@ -144,6 +145,7 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
     res.status(200).json({
       status: "active",
       plan: {
+        id: activeSub.plan_id,
         name: activeSub.plan_name,
         description: activeSub.plan_description,
         price: activeSub.plan_price,
