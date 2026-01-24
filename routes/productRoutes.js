@@ -12,12 +12,15 @@ const {
   getModelPromotableProducts,
 } = require("../controllers/productController");
 
+router.get('/search', searchProducts);
+
+const { protect } = require("../middleware/authMiddleware");
 
 router.get("/", getAllProducts);
 router.get("/promoted", getPromotedProducts);
 router.get("/model-promotable", protect, getModelPromotableProducts);
 router.get("/filters", getFilterOptions);
-router.get('/search', searchProducts);
+
 
 router.get("/:id", getProductById);
 
