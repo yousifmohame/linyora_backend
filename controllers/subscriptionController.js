@@ -56,19 +56,40 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Stripe is not initialized." });
 
   const { planId } = req.body;
+  
+  // التحقق من وجود المستخدم
+  if (!req.user) {
+      return res.status(401).json({ message: "User not authenticated" });
+  }
   const { id: userId, email: userEmail } = req.user;
 
+  // جلب الخطة من قاعدة البيانات
   const [[plan]] = await pool.query(
     "SELECT * FROM subscription_plans WHERE id = ? AND is_active = TRUE",
     [planId]
   );
+
   if (!plan) {
     return res
       .status(404)
       .json({ message: "لم يتم العثور على باقة الاشتراك." });
   }
 
+  // حساب المبلغ بالسنت/الهللة
   const unitAmount = Math.round(parseFloat(plan.price) * 100);
+
+  // ✅ التعديل هنا: تجهيز بيانات المنتج بشكل ديناميكي
+  const productData = {
+    name: plan.name,
+  };
+
+  // إضافة الوصف فقط إذا كان موجوداً وغير فارغ
+  if (plan.description && plan.description.trim() !== "") {
+    productData.description = plan.description;
+  }
+  // إذا أردت وصفاً افتراضياً في حال كان فارغاً، يمكنك إلغاء التعليق عن السطر التالي:
+  // else { productData.description = "اشتراك في منصة لينيورا"; }
+
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ["card"],
@@ -78,10 +99,7 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
       {
         price_data: {
           currency: "sar",
-          product_data: {
-            name: plan.name,
-            description: plan.description,
-          },
+          product_data: productData, // ✅ استخدام الكائن المجهز
           unit_amount: unitAmount,
           recurring: { interval: "month" },
         },
@@ -90,9 +108,10 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
     ],
     metadata: {
       userId: userId,
-      planId: plan.id, //  إضافة planId للبيانات الوصفية
+      planId: plan.id,
       sessionType: "subscription",
     },
+    // تأكد من أن FRONTEND_URL معرف في ملف .env
     success_url: `${process.env.FRONTEND_URL}/dashboard?subscription_success=true`,
     cancel_url: `${process.env.FRONTEND_URL}/dashboard/subscribe`,
   });
