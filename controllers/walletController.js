@@ -47,46 +47,79 @@ exports.getMerchantWallet = async (req, res) => {
 };
 
 /**
- * @desc    Get a list of all financial transactions for the merchant (Corrected)
+ * @desc    Get a list of all financial transactions for the merchant
  * @route   GET /api/wallet/transactions
  * @access  Private (Merchant)
  */
 exports.getWalletTransactions = async (req, res) => {
   const merchantId = req.user.id;
   try {
-    // ✅ التصحيح: الجلب مباشرة من جدول المعاملات المالية (المصدر الموحد للبيانات)
-    const [transactions] = await pool.query(
-      `SELECT 
-          id,
-          amount,
-          type,     -- 'earning' or 'payout'
-          status,   -- 'cleared', 'pending', 'pending_clearance', etc.
-          description,
-          created_at,
-          related_entity_id as reference_id
-       FROM wallet_transactions 
-       WHERE user_id = ? 
-       ORDER BY created_at DESC`,
+    // 1. Fetch all payout requests (withdrawals)
+    const [payouts] = await pool.query(
+      "SELECT id, amount, status, created_at FROM payout_requests WHERE merchant_id = ? ORDER BY created_at DESC",
       [merchantId]
     );
-
-    // تنسيق البيانات إذا لزم الأمر لتطابق ما تتوقعه الواجهة الأمامية
-    const formattedTransactions = transactions.map(t => ({
-      id: t.id,
-      amount: parseFloat(t.amount).toFixed(2), // سيظهر السحب بالسالب والأرباح بالموجب تلقائياً
-      type: t.type,
-      status: t.status,
-      description: t.description,
-      created_at: t.created_at,
-      reference_id: t.reference_id
+    const payoutTransactions = payouts.map((p) => ({
+      id: `p-${p.id}`,
+      amount: p.amount,
+      type: "payout",
+      status: p.status,
+      description: `طلب سحب #${p.id}`,
+      created_at: p.created_at,
+      reference_id: p.id,
     }));
 
-    res.json(formattedTransactions);
+    // 2. Fetch all completed orders to represent them as earnings
+    const [earnings] = await pool.query(
+      `SELECT 
+                o.id, 
+                o.created_at,
+                o.total_amount,
+                o.shipping_cost,
+                (SELECT SUM(oi.price * oi.quantity) FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = o.id AND p.merchant_id = ?) as merchant_product_total
+              FROM orders o
+              WHERE o.id IN (SELECT DISTINCT order_id FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE p.merchant_id = ?) 
+              AND o.status = 'completed'`,
+      [merchantId, merchantId]
+    );
+
+    const [settings] = await pool.query(
+      "SELECT * FROM platform_settings WHERE setting_key IN ('commission_rate')"
+    );
+    const commissionRate =
+      parseFloat(
+        settings.find((s) => s.setting_key === "commission_rate")?.setting_value
+      ) || 0;
+
+    const earningTransactions = earnings.map((e) => {
+      const platformCommission =
+        e.merchant_product_total * (commissionRate / 100);
+      const netEarning = e.merchant_product_total - platformCommission; // Simple earning for now
+      return {
+        id: `e-${e.id}`,
+        amount: netEarning.toFixed(2),
+        type: "earning",
+        status: "completed",
+        description: `أرباح من الطلب #${e.id}`,
+        created_at: e.created_at,
+        reference_id: e.id,
+      };
+    });
+
+    // 3. Combine and sort all transactions by date
+    const allTransactions = [...payoutTransactions, ...earningTransactions];
+    allTransactions.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+
+    res.json(allTransactions);
   } catch (error) {
     console.error("Error fetching transactions:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
+
 /**
  * @desc    Create a new payout request
  * @route   POST /api/wallet/request-payout
@@ -218,6 +251,50 @@ exports.getModelWallet = async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching model wallet data:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+/**
+ * @desc    Get all transactions for the current model/influencer
+ * @route   GET /api/wallet/model/transactions
+ * @access  Private (Model/Influencer)
+ */
+exports.getsupplierTransactions = async (req, res) => {
+  const userId = req.user.id;
+  try {
+    // 1. جلب معاملات الأرباح
+    const [earnings] = await pool.query(
+      `SELECT 
+                id, amount, status, description, created_at as date, related_entity_id as reference 
+             FROM wallet_transactions 
+             WHERE user_id = ? AND type = 'earning'`,
+      [userId]
+    );
+    const earningTransactions = earnings.map((t) => ({
+      ...t,
+      type: "earning",
+    }));
+
+    // 2. جلب معاملات السحب
+    const [payouts] = await pool.query(
+      `SELECT 
+                id, amount, status, 'طلب سحب' as description, created_at as date, id as reference 
+             FROM supplier_payout_requests 
+             WHERE supplier_id = ?`,
+      [userId]
+    );
+    const payoutTransactions = payouts.map((t) => ({ ...t, type: "payout" }));
+
+    // 3. دمج وترتيب جميع المعاملات
+    const allTransactions = [
+      ...earningTransactions,
+      ...payoutTransactions,
+    ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    res.status(200).json(allTransactions);
+  } catch (error) {
+    console.error("Error fetching model transactions:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
