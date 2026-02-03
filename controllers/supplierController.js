@@ -695,85 +695,112 @@ exports.updateSupplierOrderStatus = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Get supplier's wallet details and payout history
+ * @desc    Get supplier's wallet details and payout history (CORRECTED)
  * @route   GET /api/supplier/wallet
  * @access  Private/Supplier
  */
 exports.getSupplierWallet = async (req, res) => {
-  const supplierId = req.user.id;
-  try {
-    const query = `
+    const supplierId = req.user.id;
+    try {
+        // ✅ تصحيح: حساب الرصيد الصافي (الأرباح المكتملة - السحوبات)
+        // الأرباح المعلقة تظل كما هي للعرض فقط
+        const query = `
             SELECT
-                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') AS balance,
+                (
+                    (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
+                    - 
+                    (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'payout')
+                ) AS balance,
+                
                 (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'pending_clearance') AS pending_clearance
             FROM DUAL;
         `;
-    const [[wallet]] = await pool.query(query, [supplierId, supplierId]);
+        // نمرر supplierId ثلاث مرات للمعاملات الثلاث
+        const [[wallet]] = await pool.query(query, [supplierId, supplierId, supplierId]);
 
-    res.json({
-      balance: parseFloat(wallet.balance).toFixed(2),
-      pending_clearance: parseFloat(wallet.pending_clearance).toFixed(2),
-    });
-  } catch (error) {
-    console.error("Error fetching supplier wallet data:", error);
-    res.status(500).json({ message: "Server error" });
-  }
+        res.json({
+            balance: parseFloat(wallet.balance || 0).toFixed(2),
+            pending_clearance: parseFloat(wallet.pending_clearance || 0).toFixed(2),
+        });
+    } catch (error) {
+        console.error("Error fetching supplier wallet data:", error);
+        res.status(500).json({ message: "Server error" });
+    }
 };
 
 /**
- * @desc    Request a payout from the supplier wallet
+ * @desc    Request a payout from the supplier wallet (CORRECTED & SYNCED)
  * @route   POST /api/supplier/payout-request
  * @access  Private/Supplier
  */
 exports.requestPayout = asyncHandler(async (req, res) => {
-  const supplierId = req.user.id;
-  const { amount } = req.body;
+    const supplierId = req.user.id;
+    const { amount } = req.body;
 
-  if (!amount || isNaN(amount) || amount <= 0) {
-    return res.status(400).json({ message: "الرجاء إدخال مبلغ صحيح." });
-  }
+    if (!amount || isNaN(amount) || amount <= 0) {
+        return res.status(400).json({ message: "الرجاء إدخال مبلغ صحيح." });
+    }
 
-  // Get current balance
-  const [[wallet]] = await pool.query(
-    "SELECT balance FROM supplier_wallets WHERE supplier_id = ?",
-    [supplierId]
-  );
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
 
-  const currentBalance = wallet ? Number(wallet.balance) : 0;
+        // 1. ✅ حساب الرصيد الفعلي المتاح للسحب من جدول المعاملات (نفس منطق العرض)
+        // المعادلة: (مجموع الأرباح المكتملة) - (مجموع عمليات السحب السابقة)
+        const [[balanceResult]] = await connection.query(`
+            SELECT 
+                (
+                    (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
+                    - 
+                    (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'payout')
+                ) as current_balance
+        `, [supplierId, supplierId]);
 
-  if (amount > currentBalance) {
-    return res
-      .status(400)
-      .json({ message: "المبلغ المطلوب أكبر من رصيدك المتاح." });
-  }
+        const currentBalance = parseFloat(balanceResult.current_balance || 0);
 
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
+        console.log(`[Payout] User: ${supplierId}, Requested: ${amount}, Available: ${currentBalance}`);
 
-    // 1. Deduct amount from balance
-    await connection.query(
-      "UPDATE supplier_wallets SET balance = balance - ? WHERE supplier_id = ?",
-      [amount, supplierId]
-    );
+        if (amount > currentBalance) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                message: "المبلغ المطلوب أكبر من رصيدك المتاح.",
+                debug_info: `Available: ${currentBalance}, Requested: ${amount}` 
+            });
+        }
 
-    // 2. Create a payout request record
-    await connection.query(
-      "INSERT INTO supplier_payout_requests (supplier_id, amount) VALUES (?, ?)",
-      [supplierId, amount]
-    );
+        // 2. ✅ تسجيل طلب السحب في جدول طلبات السحب (للمسؤول)
+        const [payoutResult] = await connection.query(
+            "INSERT INTO supplier_payout_requests (supplier_id, amount, status) VALUES (?, ?, 'pending')",
+            [supplierId, amount]
+        );
 
-    await connection.commit();
-    res.status(201).json({ message: "تم إرسال طلب سحب الأرباح بنجاح." });
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error requesting supplier payout:", error);
-    res.status(500).json({ message: "حدث خطأ أثناء معالجة طلبك." });
-  } finally {
-    connection.release();
-  }
+        // 3. ✅ تسجيل عملية "خصم" في جدول المعاملات فوراً لتقليل الرصيد
+        // هذا يضمن أن المستخدم لا يستطيع سحب نفس المبلغ مرتين
+        await connection.query(
+            `INSERT INTO wallet_transactions 
+            (user_id, amount, type, status, description, related_entity_type, related_entity_id, created_at) 
+            VALUES (?, ?, 'payout', 'pending', ?, 'payout_request', ?, NOW())`,
+            [
+                supplierId, 
+                amount, // يمكن تسجيلها كموجب ونطرحها في الاستعلام، أو سالب ونجمعها. الكود أعلاه يطرح الـ payout
+                `طلب سحب أرباح رقم #${payoutResult.insertId}`,
+                payoutResult.insertId
+            ]
+        );
+
+        // ملاحظة: قمنا بإلغاء التحديث في supplier_wallets لأنه غير مستخدم في منطق العرض المحدث
+
+        await connection.commit();
+        res.status(201).json({ message: "تم إرسال طلب سحب الأرباح بنجاح." });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error requesting supplier payout:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء معالجة طلبك." });
+    } finally {
+        connection.release();
+    }
 });
-
 /**
  * @desc    Get all shipping companies for the logged-in supplier
  * @route   GET /api/supplier/shipping
