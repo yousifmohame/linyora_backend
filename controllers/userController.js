@@ -192,7 +192,11 @@ exports.addAddress = asyncHandler(async (req, res) => {
     postalCode,
     country,
     phoneNumber,
+    latitude,   // ✨ جديد
+    longitude,  // ✨ جديد
+    is_default  // ✨ جديد
   } = req.body;
+  
   const userId = req.user.id;
 
   // التحقق من المدخلات الأساسية
@@ -209,26 +213,57 @@ exports.addAddress = asyncHandler(async (req, res) => {
     throw new Error("الرجاء تعبئة جميع الحقول المطلوبة.");
   }
 
-  const [result] = await pool.query(
-    "INSERT INTO addresses (user_id, full_name, address_line_1, address_line_2, city, state_province_region, postal_code, country, phone_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [
-      userId,
-      fullName,
-      addressLine1,
-      addressLine2,
-      city,
-      state,
-      postalCode,
-      country,
-      phoneNumber,
-    ]
-  );
+  const connection = await pool.getConnection();
 
-  const [newAddress] = await pool.query(
-    "SELECT * FROM addresses WHERE id = ?",
-    [result.insertId]
-  );
-  res.status(201).json(newAddress[0]);
+  try {
+    await connection.beginTransaction();
+
+    // 1. إذا تم تعيين العنوان كافتراضي، قم بإلغاء الافتراضي من العناوين السابقة
+    if (is_default === true || is_default === 1 || is_default === '1') {
+      await connection.query(
+        "UPDATE addresses SET is_default = 0 WHERE user_id = ?",
+        [userId]
+      );
+    }
+
+    // 2. إضافة العنوان الجديد مع الإحداثيات
+    const [result] = await connection.query(
+      `INSERT INTO addresses 
+      (user_id, full_name, address_line_1, address_line_2, city, state_province_region, postal_code, country, phone_number, latitude, longitude, is_default) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        fullName,
+        addressLine1,
+        addressLine2 || null,
+        city,
+        state,
+        postalCode,
+        country,
+        phoneNumber,
+        latitude || null,   // تخزين الإحداثيات
+        longitude || null,  // تخزين الإحداثيات
+        is_default ? 1 : 0
+      ]
+    );
+
+    await connection.commit();
+
+    // جلب العنوان المضاف لإعادته للفرونت إند
+    const [newAddress] = await pool.query(
+      "SELECT * FROM addresses WHERE id = ?",
+      [result.insertId]
+    );
+    
+    res.status(201).json(newAddress[0]);
+
+  } catch (error) {
+    await connection.rollback();
+    res.status(500);
+    throw error;
+  } finally {
+    connection.release();
+  }
 });
 
 /**
@@ -247,38 +282,83 @@ exports.updateAddress = asyncHandler(async (req, res) => {
     postalCode,
     country,
     phoneNumber,
+    latitude,   // ✨ جديد
+    longitude,  // ✨ جديد
+    is_default  // ✨ جديد
   } = req.body;
 
-  const [address] = await pool.query(
-    "SELECT * FROM addresses WHERE id = ? AND user_id = ?",
-    [id, req.user.id]
-  );
+  const userId = req.user.id; // تأكيد الملكية
 
-  if (address.length === 0) {
-    res.status(404);
-    throw new Error("العنوان غير موجود");
+  const connection = await pool.getConnection();
+
+  try {
+    // التحقق من وجود العنوان وملكيته
+    const [address] = await connection.query(
+      "SELECT * FROM addresses WHERE id = ? AND user_id = ?",
+      [id, userId]
+    );
+
+    if (address.length === 0) {
+      res.status(404);
+      throw new Error("العنوان غير موجود");
+    }
+
+    await connection.beginTransaction();
+
+    // 1. معالجة العنوان الافتراضي
+    if (is_default === true || is_default === 1 || is_default === '1') {
+      await connection.query(
+        "UPDATE addresses SET is_default = 0 WHERE user_id = ?",
+        [userId]
+      );
+    }
+
+    // 2. تحديث البيانات
+    await connection.query(
+      `UPDATE addresses SET 
+        full_name = ?, 
+        address_line_1 = ?, 
+        address_line_2 = ?, 
+        city = ?, 
+        state_province_region = ?, 
+        postal_code = ?, 
+        country = ?, 
+        phone_number = ?,
+        latitude = ?, 
+        longitude = ?,
+        is_default = ?
+      WHERE id = ?`,
+      [
+        fullName,
+        addressLine1,
+        addressLine2 || null,
+        city,
+        state,
+        postalCode,
+        country,
+        phoneNumber,
+        latitude || null,
+        longitude || null,
+        is_default ? 1 : 0,
+        id
+      ]
+    );
+
+    await connection.commit();
+
+    const [updatedAddress] = await pool.query(
+      "SELECT * FROM addresses WHERE id = ?",
+      [id]
+    );
+    res.json(updatedAddress[0]);
+
+  } catch (error) {
+    await connection.rollback();
+    res.status(500);
+    throw error;
+  } finally {
+    connection.release();
   }
-
-  await pool.query(
-    "UPDATE addresses SET full_name = ?, address_line_1 = ?, address_line_2 = ?, city = ?, state_province_region = ?, postal_code = ?, country = ?, phone_number = ? WHERE id = ?",
-    [
-      fullName,
-      addressLine1,
-      addressLine2,
-      city,
-      state,
-      postalCode,
-      country,
-      phoneNumber,
-      id,
-    ]
-  );
-
-  const [updatedAddress] = await pool.query(
-    "SELECT * FROM addresses WHERE id = ?",
-    [id]
-  );
-  res.json(updatedAddress[0]);
 });
 
 /**
