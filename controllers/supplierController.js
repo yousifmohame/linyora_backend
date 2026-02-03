@@ -105,32 +105,37 @@ exports.submitVerification = async (req, res) => {
 exports.getSupplierDashboardStats = asyncHandler(async (req, res) => {
   const supplierId = req.user.id;
   try {
-    // ✅ FIX: The subquery for 'total_orders' has been completely rewritten
-    // to use the new, correct database structure with dropship_links.
     const [stats] = await pool.query(
       `SELECT
-                (SELECT COUNT(*) FROM supplier_products WHERE supplier_id = ?) as total_products,
-                
-                (SELECT COUNT(DISTINCT o.id) 
-                    FROM orders o
-                    JOIN order_items oi ON o.id = oi.order_id
-                    JOIN product_variants pv ON oi.product_variant_id = pv.id
-                    JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
-                    JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
-                    WHERE spv.product_id IN (SELECT id FROM supplier_products WHERE supplier_id = ?)) as total_orders,
+            -- 1. عدد المنتجات
+            (SELECT COUNT(*) FROM supplier_products WHERE supplier_id = ?) as total_products,
+            
+            -- 2. عدد الطلبات (كما هو سابقاً)
+            (SELECT COUNT(DISTINCT o.id) 
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                JOIN product_variants pv ON oi.product_variant_id = pv.id
+                JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+                JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+                WHERE spv.product_id IN (SELECT id FROM supplier_products WHERE supplier_id = ?)) as total_orders,
 
-                (SELECT COALESCE(SUM(amount), 0) 
-                    FROM wallet_transactions 
-                    WHERE user_id = ? AND type = 'earning') as total_earnings
-            `,
-      [supplierId, supplierId, supplierId]
+            -- 3. ✅ الرصيد المتاح (Available Balance)
+            -- المعادلة: الأرباح المكتملة (cleared) ناقص السحوبات (payout)
+            (
+                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
+                - 
+                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'payout')
+            ) as current_balance
+        `,
+      // ⚠️ انتبه: نحتاج تمرير supplierId 4 مرات الآن (واحدة للمنتجات، واحدة للطلبات، واثنتان للمعادلة الحسابية)
+      [supplierId, supplierId, supplierId, supplierId]
     );
 
     res.json({
       totalProducts: stats[0].total_products || 0,
       totalOrders: stats[0].total_orders || 0,
-      // We now read from wallet_transactions for consistency
-      totalEarnings: parseFloat(stats[0].total_earnings || 0).toFixed(2),
+      // إرجاع الرصيد المتاح
+      currentBalance: parseFloat(stats[0].current_balance || 0).toFixed(2),
     });
   } catch (error) {
     console.error("Error fetching supplier dashboard stats:", error);
