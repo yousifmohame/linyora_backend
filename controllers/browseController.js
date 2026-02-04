@@ -538,62 +538,120 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
   res.status(200).json(formattedMerchants);
 });
 
-exports.getHomepageLayout = async (req, res) => {
+exports.getHomeLayout = async (req, res) => {
   try {
-    const query = `
-      SELECT 
-        hl.id,
-        hl.type,
-        hl.sort_order,
-        hl.is_visible,
-        hl.settings,
-        
-        -- بيانات القسم المخصص من جدول sections
-        s.id as section_id,
-        s.title_ar,     -- ✅ العمود الصحيح للعربية
-        s.title_en,     -- ✅ العمود الصحيح للإنجليزية
-        s.theme_color,  -- ✅ العمود الصحيح للون
-        s.icon          -- ✅ الأيقونة
-      FROM homepage_layout hl
-      LEFT JOIN sections s ON hl.section_id = s.id
-      WHERE hl.is_visible = 1
-      ORDER BY hl.sort_order ASC
-    `;
+    // 1. جلب الترتيب المحفوظ (JSON)
+    const [rows] = await pool.query(
+      "SELECT config_value FROM app_configs WHERE config_key = ?",
+      ['home_layout']
+    );
 
-    const [rows] = await pool.query(query);
+    if (rows.length === 0 || !rows[0].config_value) {
+      // إرجاع تخطيط افتراضي إذا لم يوجد شيء محفوظ
+      return res.json([
+        { id: 'stories', type: 'stories', isVisible: true },
+        { id: 'slider', type: 'main_slider', isVisible: true },
+        { id: 'new', type: 'new_arrivals', isVisible: true }
+      ]);
+    }
 
-    const layout = rows.map(row => {
-      const item = {
-        id: row.id,
-        type: row.type,
-        order: row.sort_order,
-        isVisible: row.is_visible === 1,
-      };
+    // التأكد من أن البيانات مصفوفة (في بعض المكاتب تأتي كنص)
+    let layout = rows[0].config_value;
+    if (typeof layout === 'string') {
+        layout = JSON.parse(layout);
+    }
 
-      // إذا كان العنصر عبارة عن قسم مخصص
-      if (row.type === 'custom_section' && row.section_id) {
-        item.data = {
-          id: row.section_id,
-          // نرسل العنوان العربي كعنوان أساسي، أو الإنجليزي إذا لم يوجد عربي
-          title: row.title_ar || row.title_en, 
-          // نرسل العناوين منفصلة أيضاً إذا أردت دعم تعدد اللغات في الفرونت
-          title_ar: row.title_ar,
-          title_en: row.title_en,
-          // نرسل اللون (مع تعيين لون افتراضي إذا كان فارغاً)
-          background_color: row.theme_color || '#ffffff',
-          icon: row.icon,
-          // النوع الافتراضي للعرض
-          type: 'grid' 
-        };
+    // 2. تعبئة البيانات (Hydration)
+    // نمر على كل عنصر في الترتيب، إذا كان قسماً مخصصاً نجلب بياناته من الداتابيس
+    const populatedLayout = await Promise.all(layout.map(async (item) => {
+      
+      // إذا كان العنصر مخفياً، نرجعه كما هو (أو يمكن حذفه)
+      if (item.isVisible === false) return item;
+
+      // إذا كان قسماً مخصصاً (custom_section) وله ID
+      if (item.type === 'custom_section' && item.section_id) {
+        try {
+          // جلب تفاصيل القسم + المنتجات
+          const [products] = await pool.query(`
+            SELECT 
+                s.title_ar, s.title_en, s.theme_color, s.icon,
+                p.id, p.name, p.price, p.compare_at_price, p.slug,
+                (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_main DESC LIMIT 1) as image_url
+            FROM sections s
+            JOIN section_products sp ON s.id = sp.section_id
+            JOIN products p ON sp.product_id = p.id
+            WHERE s.id = ? AND p.is_active = 1
+            LIMIT 10
+          `, [item.section_id]);
+
+          if (products.length > 0) {
+            // تجهيز بيانات القسم
+            const sectionInfo = products[0]; // نأخذ معلومات القسم من أول صف
+            
+            // إضافة البيانات للعنصر (item) ليفهمها الفرونت إند
+            return {
+              ...item,
+              data: {
+                id: item.section_id,
+                title: sectionInfo.title_ar || sectionInfo.title_en,
+                title_ar: sectionInfo.title_ar,
+                title_en: sectionInfo.title_en,
+                background_color: sectionInfo.theme_color || '#ffffff',
+                icon: sectionInfo.icon,
+                type: 'grid',
+                // تجميع المنتجات
+                products: products.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    price: parseFloat(p.price),
+                    compare_at_price: p.compare_at_price ? parseFloat(p.compare_at_price) : null,
+                    slug: p.slug,
+                    images: p.image_url ? [p.image_url] : [],
+                    category: "General"
+                }))
+              }
+            };
+          }
+        } catch (err) {
+          console.error(`Error fetching section ${item.section_id}:`, err.message);
+        }
       }
 
+      // للعناصر العادية (slider, stories, etc) نرجعها كما هي
       return item;
+    }));
+
+    // إرجاع المصفوفة النهائية
+    res.json(populatedLayout);
+
+  } catch (err) {
+    console.error("Error fetching layout:", err.message);
+    res.status(500).send('Server Error');
+  }
+};
+
+// حفظ الترتيب (نفس الكود الخاص بك تماماً)
+exports.updateHomeLayout = async (req, res) => {
+  try {
+    const layout = req.body; 
+    const layoutJson = JSON.stringify(layout);
+
+    const query = `
+      INSERT INTO app_configs (config_key, config_value)
+      VALUES (?, ?)
+      ON DUPLICATE KEY UPDATE 
+        config_value = VALUES(config_value), 
+        updated_at = CURRENT_TIMESTAMP
+    `;
+
+    await pool.query(query, ['home_layout', layoutJson]);
+
+    res.json({ 
+        message: 'تم حفظ تخطيط الصفحة الرئيسية بنجاح'
     });
 
-    res.json(layout);
-
-  } catch (error) {
-    console.error('Error fetching homepage layout:', error);
-    res.status(500).json({ message: 'Server error fetching layout' });
+  } catch (err) {
+    console.error("Error updating layout:", err.message);
+    res.status(500).send('Server Error');
   }
 };
