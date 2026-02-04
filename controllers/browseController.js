@@ -537,3 +537,60 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
 
   res.status(200).json(formattedMerchants);
 });
+
+exports.getHomepageLayout = async (req, res) => {
+  try {
+    // نجلب عناصر التخطيط ونربطها بجدول الأقسام (sections) إذا كان هناك section_id
+    const query = `
+      SELECT 
+        hl.id,
+        hl.type,
+        hl.sort_order,
+        hl.is_visible,
+        hl.settings,
+        -- نجلب بيانات القسم المخصص إذا وجد
+        s.id as section_id,
+        s.title as section_title,
+        s.type as section_style, 
+        s.background_color,
+        s.text_color
+      FROM homepage_layout hl
+      LEFT JOIN sections s ON hl.section_id = s.id
+      WHERE hl.is_visible = 1
+      ORDER BY hl.sort_order ASC
+    `;
+
+    const [rows] = await pool.query(query);
+
+    // تنسيق البيانات لتناسب الفرونت إند
+    const layout = rows.map(row => {
+      const item = {
+        id: row.id,
+        type: row.type,
+        order: row.sort_order,
+        isVisible: row.is_visible === 1,
+      };
+
+      // إذا كان قسماً مخصصاً، نضيف بياناته في حقل 'data'
+      if (row.type === 'custom_section' && row.section_id) {
+        item.data = {
+          id: row.section_id,
+          title: row.section_title,
+          type: row.section_style, // style: grid, slider, etc.
+          background_color: row.background_color,
+          text_color: row.text_color,
+          // ملاحظة: المنتجات الخاصة بالقسم يمكن جلبها هنا عبر subquery 
+          // أو يمكن للفرونت إند جلبها بناءً على section_id
+        };
+      }
+
+      return item;
+    });
+
+    res.json(layout);
+
+  } catch (error) {
+    console.error('Error fetching homepage layout:', error);
+    res.status(500).json({ message: 'Server error fetching layout' });
+  }
+};
