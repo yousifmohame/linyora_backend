@@ -13,7 +13,7 @@ const {
   getTopRated,
   getTopModels,
   getTopMerchants,
-  getHomepageLayout,
+  getHomeLayout,
 } = require("../controllers/browseController");
 const { protect, restrictTo, optionalProtect } = require("../middleware/authMiddleware");
 const { getActiveBanners } = require("../controllers/mainBannerController"); // استيراد الدالة الجديدة
@@ -23,7 +23,7 @@ const { getAllCategories } = require("../controllers/categoryController"); // �
 router.get("/trends", getPromotedProducts);
 router.get("/all-products", getAllProductsForTagging);
 router.get("/main-banners", getActiveBanners);
-router.get('/homepage/layout', getHomepageLayout);
+router.get('/homepage/layout', getHomeLayout);
 router.get("/categories", getAllCategories);
 router.route("/new-arrivals").get(getNewArrivals);
 router.route("/best-sellers").get(getBestSellers);
