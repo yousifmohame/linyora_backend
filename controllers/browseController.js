@@ -538,111 +538,32 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
   res.status(200).json(formattedMerchants);
 });
 
+// جلب ترتيب الصفحة الرئيسية للموقع
 exports.getHomeLayout = async (req, res) => {
   try {
-    // 1. جلب الترتيب المحفوظ من الأدمن (إن وجد)
-    const [configRows] = await pool.query(
+    // نجلب الترتيب فقط (بدون أي تعقيدات أو جداول إضافية)
+    const [rows] = await pool.query(
       "SELECT config_value FROM app_configs WHERE config_key = ?",
       ['web_home_layout']
     );
 
-    let savedLayout = [];
-    if (configRows.length > 0 && configRows[0].config_value) {
-      const val = configRows[0].config_value;
-      savedLayout = typeof val === 'string' ? JSON.parse(val) : val;
+    if (rows.length > 0 && rows[0].config_value) {
+      // نرجع الـ JSON كما هو
+      let layout = rows[0].config_value;
+      // تأكد أنه مصفوفة وليس نص
+      if (typeof layout === 'string') layout = JSON.parse(layout);
+      res.json(layout);
     } else {
-      // ترتيب افتراضي يشبه الكود الأصلي الخاص بك
-      savedLayout = [
-        { id: 'stories', type: 'stories', order: 1, isVisible: true },
-        { id: 'slider', type: 'main_slider', order: 2, isVisible: true },
-        { id: 'promo', type: 'promoted_products', order: 3, isVisible: true },
-        { id: 'flash', type: 'flash_sale', order: 4, isVisible: true },
-        { id: 'cats', type: 'categories', order: 5, isVisible: true },
-        // الأقسام المخصصة ستأتي هنا
-        { id: 'reels', type: 'reels', order: 50, isVisible: true },
-        { id: 'new', type: 'new_arrivals', order: 51, isVisible: true },
-        { id: 'best', type: 'best_sellers', order: 52, isVisible: true },
-        { id: 'top', type: 'top_rated', order: 53, isVisible: true },
-        { id: 'recent', type: 'recently_viewed', order: 54, isVisible: true }
-      ];
+      // إذا لم يوجد ترتيب، نرجع مصفوفة فارغة والفرونت يتصرف
+      res.json([]);
     }
-
-    // 2. جلب كافة الأقسام النشطة من قاعدة البيانات
-    // هذا يحل محل api.get('/sections/active') الذي كنت تستخدمه
-    const [allSections] = await pool.query(`
-      SELECT id, title_ar, title_en, theme_color, icon, 
-      (SELECT COUNT(*) FROM section_products WHERE section_id = sections.id) as product_count
-      FROM sections 
-      WHERE is_active = 1
-    `);
-
-    // 3. دمج الأقسام الموجودة في الترتيب المحفوظ مع الأقسام الجديدة
-    const existingSectionIds = savedLayout
-      .filter(item => item.type === 'custom_section')
-      .map(item => Number(item.section_id));
-
-    const newSections = allSections
-      .filter(sec => !existingSectionIds.includes(sec.id))
-      .map((sec, index) => ({
-        id: `auto_sec_${sec.id}`,
-        type: 'custom_section',
-        section_id: sec.id,
-        order: 20 + index, // نضعها في المنتصف أو النهاية
-        isVisible: true
-      }));
-
-    // دمج القائمتين
-    let finalLayout = [...savedLayout, ...newSections];
-    finalLayout.sort((a, b) => a.order - b.order);
-
-    // 4. تعبئة بيانات الأقسام (Hydration)
-    // هنا نجهز البيانات لكي يستخدمها مكون SectionDisplay مباشرة
-    const layoutWithData = await Promise.all(finalLayout.map(async (item) => {
-      // للعناصر العادية، نرجعها كما هي
-      if (item.type !== 'custom_section') return item;
-
-      // للأقسام المخصصة، نربطها ببياناتها
-      const sectionInfo = allSections.find(s => s.id == item.section_id);
-      
-      if (!sectionInfo) return null; // قسم تم حذفه
-
-      // جلب المنتجات لهذا القسم (كما يفعل SectionDisplay عادة)
-      const [products] = await pool.query(`
-        SELECT 
-            p.id, p.name, p.price, p.compare_at_price, p.slug,
-            (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_main DESC LIMIT 1) as image_url
-        FROM section_products sp
-        JOIN products p ON sp.product_id = p.id
-        WHERE sp.section_id = ? AND p.is_active = 1
-        LIMIT 10
-      `, [item.section_id]);
-
-      return {
-        ...item,
-        data: {
-          id: sectionInfo.id,
-          title: sectionInfo.title_ar || sectionInfo.title_en,
-          background_color: sectionInfo.theme_color,
-          icon: sectionInfo.icon,
-          products: products.map(p => ({
-             ...p,
-             images: p.image_url ? [p.image_url] : [],
-             price: parseFloat(p.price)
-          }))
-        }
-      };
-    }));
-
-    // تنظيف العناصر الفارغة (null)
-    res.json(layoutWithData.filter(item => item !== null));
-
   } catch (err) {
-    console.error(err);
+    console.error("Error fetching layout:", err.message);
     res.status(500).send('Server Error');
   }
 };
 
-// حفظ ترتيب الصفحة الرئيسية (للموقع Web)
+// حفظ الترتيب (بسيط جداً)
 exports.updateHomeLayout = async (req, res) => {
   try {
     const layout = req.body; 
@@ -656,13 +577,9 @@ exports.updateHomeLayout = async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     `;
 
-    // ✅ التعديل هنا أيضاً: الحفظ في 'web_home_layout'
     await pool.query(query, ['web_home_layout', layoutJson]);
 
-    res.json({ 
-        message: 'تم حفظ تخطيط الموقع بنجاح'
-    });
-
+    res.json({ message: 'تم حفظ تخطيط الموقع بنجاح' });
   } catch (err) {
     console.error("Error updating layout:", err.message);
     res.status(500).send('Server Error');
