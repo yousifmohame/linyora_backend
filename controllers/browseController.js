@@ -547,14 +547,13 @@ exports.getHomepageLayout = async (req, res) => {
         hl.sort_order,
         hl.is_visible,
         hl.settings,
-        -- نجلب بيانات القسم المخصص
+        
+        -- بيانات القسم المخصص من جدول sections
         s.id as section_id,
-        
-        -- ✅ التصحيح هنا: استبدلنا title بـ name (أو الاسم الصحيح في جدولك)
-        s.name as section_title, 
-        
-        -- تأكد أيضاً أن هذه الأعمدة موجودة، وإلا احذفها من الاستعلام
-        s.type as section_style
+        s.title_ar,     -- ✅ العمود الصحيح للعربية
+        s.title_en,     -- ✅ العمود الصحيح للإنجليزية
+        s.theme_color,  -- ✅ العمود الصحيح للون
+        s.icon          -- ✅ الأيقونة
       FROM homepage_layout hl
       LEFT JOIN sections s ON hl.section_id = s.id
       WHERE hl.is_visible = 1
@@ -571,12 +570,20 @@ exports.getHomepageLayout = async (req, res) => {
         isVisible: row.is_visible === 1,
       };
 
+      // إذا كان العنصر عبارة عن قسم مخصص
       if (row.type === 'custom_section' && row.section_id) {
         item.data = {
           id: row.section_id,
-          title: row.section_title, // سيأخذ الاسم من العمود name
-          type: row.section_style,
-          // حذفت background_color و text_color مؤقتاً لتجنب أخطاء أخرى إذا لم تكن موجودة
+          // نرسل العنوان العربي كعنوان أساسي، أو الإنجليزي إذا لم يوجد عربي
+          title: row.title_ar || row.title_en, 
+          // نرسل العناوين منفصلة أيضاً إذا أردت دعم تعدد اللغات في الفرونت
+          title_ar: row.title_ar,
+          title_en: row.title_en,
+          // نرسل اللون (مع تعيين لون افتراضي إذا كان فارغاً)
+          background_color: row.theme_color || '#ffffff',
+          icon: row.icon,
+          // النوع الافتراضي للعرض
+          type: 'grid' 
         };
       }
 
