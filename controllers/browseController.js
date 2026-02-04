@@ -540,131 +540,104 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
 
 exports.getHomeLayout = async (req, res) => {
   try {
-    // 1. جلب الترتيب المحفوظ (للعناصر الثابتة مثل السلايدر والقصص)
+    // 1. جلب الترتيب المحفوظ من الأدمن (إن وجد)
     const [configRows] = await pool.query(
       "SELECT config_value FROM app_configs WHERE config_key = ?",
       ['web_home_layout']
     );
 
-    let layout = [];
+    let savedLayout = [];
     if (configRows.length > 0 && configRows[0].config_value) {
       const val = configRows[0].config_value;
-      layout = typeof val === 'string' ? JSON.parse(val) : val;
+      savedLayout = typeof val === 'string' ? JSON.parse(val) : val;
     } else {
-      // ترتيب افتراضي في حال عدم وجود إعدادات
-      layout = [
+      // ترتيب افتراضي يشبه الكود الأصلي الخاص بك
+      savedLayout = [
         { id: 'stories', type: 'stories', order: 1, isVisible: true },
         { id: 'slider', type: 'main_slider', order: 2, isVisible: true },
-        { id: 'new', type: 'new_arrivals', order: 3, isVisible: true }
+        { id: 'promo', type: 'promoted_products', order: 3, isVisible: true },
+        { id: 'flash', type: 'flash_sale', order: 4, isVisible: true },
+        { id: 'cats', type: 'categories', order: 5, isVisible: true },
+        // الأقسام المخصصة ستأتي هنا
+        { id: 'reels', type: 'reels', order: 50, isVisible: true },
+        { id: 'new', type: 'new_arrivals', order: 51, isVisible: true },
+        { id: 'best', type: 'best_sellers', order: 52, isVisible: true },
+        { id: 'top', type: 'top_rated', order: 53, isVisible: true },
+        { id: 'recent', type: 'recently_viewed', order: 54, isVisible: true }
       ];
     }
 
-    // 2. جلب جميع الأقسام النشطة من قاعدة البيانات
+    // 2. جلب كافة الأقسام النشطة من قاعدة البيانات
+    // هذا يحل محل api.get('/sections/active') الذي كنت تستخدمه
     const [allSections] = await pool.query(`
-      SELECT id, title_ar, title_en, theme_color, icon 
+      SELECT id, title_ar, title_en, theme_color, icon, 
+      (SELECT COUNT(*) FROM section_products WHERE section_id = sections.id) as product_count
       FROM sections 
       WHERE is_active = 1
     `);
 
-    // 3. دمج الأقسام (Logic Merge)
-    // نتحقق من الأقسام الموجودة في الـ Layout مسبقاً
-    const existingSectionIds = layout
-      .filter(item => item.type === 'custom_section' && item.section_id)
-      .map(item => item.section_id);
+    // 3. دمج الأقسام الموجودة في الترتيب المحفوظ مع الأقسام الجديدة
+    const existingSectionIds = savedLayout
+      .filter(item => item.type === 'custom_section')
+      .map(item => Number(item.section_id));
 
-    // ننشئ عناصر جديدة للأقسام غير الموجودة في الـ Layout
-    const dynamicSections = allSections
-      .filter(section => !existingSectionIds.includes(section.id)) // فقط الأقسام الجديدة
-      .map((section, index) => ({
-        id: `auto_section_${section.id}`,
+    const newSections = allSections
+      .filter(sec => !existingSectionIds.includes(sec.id))
+      .map((sec, index) => ({
+        id: `auto_sec_${sec.id}`,
         type: 'custom_section',
-        section_id: section.id,
-        order: 100 + index, // نضعها في نهاية الصفحة
-        isVisible: true,
-        // يمكننا تمرير البيانات الأساسية هنا مؤقتاً
-        _preloadedData: section 
+        section_id: sec.id,
+        order: 20 + index, // نضعها في المنتصف أو النهاية
+        isVisible: true
       }));
 
-    // دمج القائمتين (الترتيب المحفوظ + الأقسام الجديدة)
-    const finalLayoutList = [...layout, ...dynamicSections];
+    // دمج القائمتين
+    let finalLayout = [...savedLayout, ...newSections];
+    finalLayout.sort((a, b) => a.order - b.order);
 
-    // ترتيب القائمة النهائية بناءً على order
-    finalLayoutList.sort((a, b) => a.order - b.order);
+    // 4. تعبئة بيانات الأقسام (Hydration)
+    // هنا نجهز البيانات لكي يستخدمها مكون SectionDisplay مباشرة
+    const layoutWithData = await Promise.all(finalLayout.map(async (item) => {
+      // للعناصر العادية، نرجعها كما هي
+      if (item.type !== 'custom_section') return item;
 
-    // 4. تعبئة البيانات (Hydration) وجلب المنتجات
-    const populatedLayout = await Promise.all(finalLayoutList.map(async (item) => {
+      // للأقسام المخصصة، نربطها ببياناتها
+      const sectionInfo = allSections.find(s => s.id == item.section_id);
       
-      // تخطي العناصر المخفية
-      if (item.isVisible === false) return item;
+      if (!sectionInfo) return null; // قسم تم حذفه
 
-      // معالجة الأقسام المخصصة (سواء كانت من الـ Layout أو مضافة ديناميكياً)
-      if (item.type === 'custom_section' && item.section_id) {
-        try {
-          // جلب المنتجات لهذا القسم
-          // ملاحظة: نجلب المنتجات فقط، أما بيانات القسم (العنوان واللون) قد تكون لدينا مسبقاً
-          const [products] = await pool.query(`
-            SELECT 
-                p.id, p.name, p.price, p.compare_at_price, p.slug,
-                (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_main DESC LIMIT 1) as image_url
-            FROM section_products sp
-            JOIN products p ON sp.product_id = p.id
-            WHERE sp.section_id = ? AND p.is_active = 1
-            LIMIT 10
-          `, [item.section_id]);
+      // جلب المنتجات لهذا القسم (كما يفعل SectionDisplay عادة)
+      const [products] = await pool.query(`
+        SELECT 
+            p.id, p.name, p.price, p.compare_at_price, p.slug,
+            (SELECT image_url FROM product_images WHERE product_id = p.id ORDER BY is_main DESC LIMIT 1) as image_url
+        FROM section_products sp
+        JOIN products p ON sp.product_id = p.id
+        WHERE sp.section_id = ? AND p.is_active = 1
+        LIMIT 10
+      `, [item.section_id]);
 
-          // إذا كان القسم فارغاً من المنتجات، قد ترغب في إخفائه (اختياري)
-          /* if (products.length === 0) return { ...item, isVisible: false }; */
-
-          // تحديد بيانات القسم (إما من الداتابيس مباشرة أو من البيانات المحملة مسبقاً)
-          let sectionInfo = item._preloadedData; 
-          
-          // إذا لم تكن البيانات محملة مسبقاً (أي أن العنصر كان في الـ JSON القديم)، نجلبها الآن
-          if (!sectionInfo) {
-             const [secRows] = await pool.query(
-                "SELECT title_ar, title_en, theme_color, icon FROM sections WHERE id = ?", 
-                [item.section_id]
-             );
-             if (secRows.length > 0) sectionInfo = secRows[0];
-          }
-
-          if (sectionInfo) {
-            return {
-              ...item,
-              // نحذف الحقل المؤقت
-              _preloadedData: undefined, 
-              data: {
-                id: item.section_id,
-                title: sectionInfo.title_ar || sectionInfo.title_en,
-                title_ar: sectionInfo.title_ar,
-                title_en: sectionInfo.title_en,
-                background_color: sectionInfo.theme_color || '#ffffff',
-                icon: sectionInfo.icon,
-                type: 'grid',
-                products: products.map(p => ({
-                    id: p.id,
-                    name: p.name,
-                    price: parseFloat(p.price),
-                    compare_at_price: p.compare_at_price ? parseFloat(p.compare_at_price) : null,
-                    slug: p.slug,
-                    images: p.image_url ? [p.image_url] : [],
-                    category: "General"
-                }))
-              }
-            };
-          }
-        } catch (err) {
-          console.error(`Error processing section ${item.section_id}:`, err.message);
+      return {
+        ...item,
+        data: {
+          id: sectionInfo.id,
+          title: sectionInfo.title_ar || sectionInfo.title_en,
+          background_color: sectionInfo.theme_color,
+          icon: sectionInfo.icon,
+          products: products.map(p => ({
+             ...p,
+             images: p.image_url ? [p.image_url] : [],
+             price: parseFloat(p.price)
+          }))
         }
-      }
-
-      return item;
+      };
     }));
 
-    // إرجاع النتيجة
-    res.json(populatedLayout);
+    // تنظيف العناصر الفارغة (null)
+    res.json(layoutWithData.filter(item => item !== null));
 
   } catch (err) {
-    console.error("Error fetching dynamic layout:", err.message);
+    console.error(err);
     res.status(500).send('Server Error');
   }
 };
