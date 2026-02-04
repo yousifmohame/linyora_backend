@@ -14,16 +14,30 @@ const {
   getTopModels,
   getTopMerchants,
   getHomeLayout,
+  updateHomeLayout, // ✅ 1. تمت إضافة دالة التحديث هنا
 } = require("../controllers/browseController");
-const { protect, restrictTo, optionalProtect } = require("../middleware/authMiddleware");
-const { getActiveBanners } = require("../controllers/mainBannerController"); // استيراد الدالة الجديدة
-const { getAllCategories } = require("../controllers/categoryController"); // ✅ أضف هذا السطر
 
-// هذه المسارات متاحة فقط للتجار المسجلين (roleId = 2)
+const { protect, restrictTo, optionalProtect } = require("../middleware/authMiddleware");
+const { getActiveBanners } = require("../controllers/mainBannerController");
+const { getAllCategories } = require("../controllers/categoryController");
+
+// --- المسارات العامة (Public Routes) ---
+
+// جلب الترتيب (متاح للجميع)
+router.get('/homepage/layout', getHomeLayout);
+
+// ✅ 2. حفظ الترتيب (للأدمن فقط)
+// هذا هو الرابط الذي يطلبه زر الحفظ في الفرونت إند
+router.post(
+  '/homepage/layout', 
+  protect,        // يجب أن يكون مسجلاً للدخول
+  restrictTo(1),  // يجب أن يكون أدمن (Role ID = 1)
+  updateHomeLayout
+);
+
 router.get("/trends", getPromotedProducts);
 router.get("/all-products", getAllProductsForTagging);
 router.get("/main-banners", getActiveBanners);
-router.get('/homepage/layout', getHomeLayout);
 router.get("/categories", getAllCategories);
 router.route("/new-arrivals").get(getNewArrivals);
 router.route("/best-sellers").get(getBestSellers);
@@ -34,6 +48,7 @@ router.get("/categories/:slug", getProductsByCategorySlug);
 router.get("/top-models", optionalProtect, getTopModels);
 router.get("/top-merchants", optionalProtect, getTopMerchants);
 
+// --- المسارات المحمية (تجار ومودلز) ---
 router.use(protect, restrictTo(2));
 
 router.get("/models", getAllModels);
