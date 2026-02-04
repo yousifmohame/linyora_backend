@@ -540,38 +540,34 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
 
 exports.getHomeLayout = async (req, res) => {
   try {
-    // 1. جلب الترتيب المحفوظ (JSON)
+    // ✅ التعديل هنا: غيرنا المفتاح إلى 'web_home_layout'
     const [rows] = await pool.query(
       "SELECT config_value FROM app_configs WHERE config_key = ?",
-      ['home_layout']
+      ['web_home_layout'] 
     );
 
+    // إذا لم يوجد ترتيب محفوظ للموقع، نرجع مصفوفة فارغة ليستخدم الفرونت الترتيب الافتراضي
     if (rows.length === 0 || !rows[0].config_value) {
-      // إرجاع تخطيط افتراضي إذا لم يوجد شيء محفوظ
-      return res.json([
-        { id: 'stories', type: 'stories', isVisible: true },
-        { id: 'slider', type: 'main_slider', isVisible: true },
-        { id: 'new', type: 'new_arrivals', isVisible: true }
-      ]);
+      return res.json([]); 
     }
 
-    // التأكد من أن البيانات مصفوفة (في بعض المكاتب تأتي كنص)
     let layout = rows[0].config_value;
+    // التأكد من أن البيانات مصفوفة
     if (typeof layout === 'string') {
-        layout = JSON.parse(layout);
+        try {
+            layout = JSON.parse(layout);
+        } catch (e) {
+            return res.json([]); // في حال كان الـ JSON تالفاً
+        }
     }
 
-    // 2. تعبئة البيانات (Hydration)
-    // نمر على كل عنصر في الترتيب، إذا كان قسماً مخصصاً نجلب بياناته من الداتابيس
+    // 2. تعبئة البيانات (Hydration) - نفس الكود السابق تماماً
     const populatedLayout = await Promise.all(layout.map(async (item) => {
       
-      // إذا كان العنصر مخفياً، نرجعه كما هو (أو يمكن حذفه)
       if (item.isVisible === false) return item;
 
-      // إذا كان قسماً مخصصاً (custom_section) وله ID
       if (item.type === 'custom_section' && item.section_id) {
         try {
-          // جلب تفاصيل القسم + المنتجات
           const [products] = await pool.query(`
             SELECT 
                 s.title_ar, s.title_en, s.theme_color, s.icon,
@@ -585,10 +581,7 @@ exports.getHomeLayout = async (req, res) => {
           `, [item.section_id]);
 
           if (products.length > 0) {
-            // تجهيز بيانات القسم
-            const sectionInfo = products[0]; // نأخذ معلومات القسم من أول صف
-            
-            // إضافة البيانات للعنصر (item) ليفهمها الفرونت إند
+            const sectionInfo = products[0];
             return {
               ...item,
               data: {
@@ -599,7 +592,6 @@ exports.getHomeLayout = async (req, res) => {
                 background_color: sectionInfo.theme_color || '#ffffff',
                 icon: sectionInfo.icon,
                 type: 'grid',
-                // تجميع المنتجات
                 products: products.map(p => ({
                     id: p.id,
                     name: p.name,
@@ -616,12 +608,9 @@ exports.getHomeLayout = async (req, res) => {
           console.error(`Error fetching section ${item.section_id}:`, err.message);
         }
       }
-
-      // للعناصر العادية (slider, stories, etc) نرجعها كما هي
       return item;
     }));
 
-    // إرجاع المصفوفة النهائية
     res.json(populatedLayout);
 
   } catch (err) {
@@ -630,7 +619,7 @@ exports.getHomeLayout = async (req, res) => {
   }
 };
 
-// حفظ الترتيب (نفس الكود الخاص بك تماماً)
+// حفظ ترتيب الصفحة الرئيسية (للموقع Web)
 exports.updateHomeLayout = async (req, res) => {
   try {
     const layout = req.body; 
@@ -644,10 +633,11 @@ exports.updateHomeLayout = async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     `;
 
-    await pool.query(query, ['home_layout', layoutJson]);
+    // ✅ التعديل هنا أيضاً: الحفظ في 'web_home_layout'
+    await pool.query(query, ['web_home_layout', layoutJson]);
 
     res.json({ 
-        message: 'تم حفظ تخطيط الصفحة الرئيسية بنجاح'
+        message: 'تم حفظ تخطيط الموقع بنجاح'
     });
 
   } catch (err) {
