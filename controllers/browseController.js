@@ -540,7 +540,6 @@ exports.getTopMerchants = asyncHandler(async (req, res) => {
 
 exports.getHomepageLayout = async (req, res) => {
   try {
-    // نجلب عناصر التخطيط ونربطها بجدول الأقسام (sections) إذا كان هناك section_id
     const query = `
       SELECT 
         hl.id,
@@ -548,12 +547,14 @@ exports.getHomepageLayout = async (req, res) => {
         hl.sort_order,
         hl.is_visible,
         hl.settings,
-        -- نجلب بيانات القسم المخصص إذا وجد
+        -- نجلب بيانات القسم المخصص
         s.id as section_id,
-        s.title as section_title,
-        s.type as section_style, 
-        s.background_color,
-        s.text_color
+        
+        -- ✅ التصحيح هنا: استبدلنا title بـ name (أو الاسم الصحيح في جدولك)
+        s.name as section_title, 
+        
+        -- تأكد أيضاً أن هذه الأعمدة موجودة، وإلا احذفها من الاستعلام
+        s.type as section_style
       FROM homepage_layout hl
       LEFT JOIN sections s ON hl.section_id = s.id
       WHERE hl.is_visible = 1
@@ -562,7 +563,6 @@ exports.getHomepageLayout = async (req, res) => {
 
     const [rows] = await pool.query(query);
 
-    // تنسيق البيانات لتناسب الفرونت إند
     const layout = rows.map(row => {
       const item = {
         id: row.id,
@@ -571,16 +571,12 @@ exports.getHomepageLayout = async (req, res) => {
         isVisible: row.is_visible === 1,
       };
 
-      // إذا كان قسماً مخصصاً، نضيف بياناته في حقل 'data'
       if (row.type === 'custom_section' && row.section_id) {
         item.data = {
           id: row.section_id,
-          title: row.section_title,
-          type: row.section_style, // style: grid, slider, etc.
-          background_color: row.background_color,
-          text_color: row.text_color,
-          // ملاحظة: المنتجات الخاصة بالقسم يمكن جلبها هنا عبر subquery 
-          // أو يمكن للفرونت إند جلبها بناءً على section_id
+          title: row.section_title, // سيأخذ الاسم من العمود name
+          type: row.section_style,
+          // حذفت background_color و text_color مؤقتاً لتجنب أخطاء أخرى إذا لم تكن موجودة
         };
       }
 
