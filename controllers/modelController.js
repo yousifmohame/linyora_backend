@@ -2,12 +2,29 @@
 const pool = require("../config/db");
 
 // [GET] جلب بيانات الملف الشخصي للمودل الحالية
+// [GET] جلب بيانات الملف الشخصي للمودل الحالية
 exports.getMyProfile = async (req, res) => {
   try {
-    const [profile] = await pool.query(
-      "SELECT name, email, profile_picture_url, store_banner_url, bio, portfolio, social_links, stats FROM users WHERE id = ?",
-      [req.user.id]
-    );
+    const userId = req.user.id;
+
+    // استعلام يجلب بيانات المستخدم + يحسب عدد المتابعين من جدول user_follows
+    // حيث يكون المستخدم الحالي هو "الشخص الذي تتم متابعته" (following_id)
+    const query = `
+      SELECT 
+        u.name, 
+        u.email, 
+        u.profile_picture_url, 
+        u.store_banner_url, 
+        u.bio, 
+        u.portfolio, 
+        u.social_links, 
+        u.stats,
+        (SELECT COUNT(*) FROM user_follows uf WHERE uf.following_id = u.id) as followers_count
+      FROM users u 
+      WHERE u.id = ?
+    `;
+
+    const [profile] = await pool.query(query, [userId]);
 
     if (profile.length === 0) {
       return res
@@ -16,6 +33,8 @@ exports.getMyProfile = async (req, res) => {
     }
 
     const userProfile = profile[0];
+
+    // تحليل حقول JSON
     userProfile.portfolio = userProfile.portfolio
       ? JSON.parse(userProfile.portfolio)
       : [];
@@ -24,8 +43,11 @@ exports.getMyProfile = async (req, res) => {
       : {};
     userProfile.stats = userProfile.stats ? JSON.parse(userProfile.stats) : {};
 
+    // النتيجة الآن تحتوي على حقل followers_count بشكل تلقائي من الاستعلام
+
     res.status(200).json(userProfile);
   } catch (error) {
+    console.error("Error fetching profile:", error);
     res.status(500).json({ message: "خطأ في جلب الملف الشخصي." });
   }
 };
