@@ -588,9 +588,10 @@ exports.updateProfilePicture = asyncHandler(async (req, res) => {
 // @access  Public
 exports.getUserPublicProfile = asyncHandler(async (req, res) => {
   const userIdToView = req.params.id;
-  const currentUserId = req.user?.id; // 👈 جلب هوية المستخدم الحالي
+  const currentUserId = req.user?.id;
+
   try {
-    // --- 1. جلب بيانات المستخدم الأساسية + حالة المتابعة ---
+    // --- 1. جلب بيانات المستخدم + حالة المتابعة + عدد المتابعين الداخليين ---
     const userQuery = `
       SELECT 
         u.id, 
@@ -603,11 +604,14 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
         u.portfolio, 
         u.is_verified, 
         r.name as role_name,
+        -- ✅ التحقق مما إذا كنت تتابعه
         ${
           currentUserId
             ? `(SELECT COUNT(*) FROM user_follows uf WHERE uf.follower_id = ? AND uf.following_id = u.id) > 0`
             : "FALSE"
-        } as isFollowedByMe
+        } as isFollowedByMe,
+        -- ✅ حساب عدد المتابعين في المنصة
+        (SELECT COUNT(*) FROM user_follows uf WHERE uf.following_id = u.id) as followers_count
       FROM users u
       JOIN roles r ON u.role_id = r.id
       WHERE u.id = ? 
@@ -615,7 +619,6 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
         AND r.name IN ('العارضة', 'المؤثرة');
     `;
 
-    // تحديد معاملات الاستعلام حسب وجود currentUserId
     const userQueryParams = currentUserId
       ? [currentUserId, userIdToView]
       : [userIdToView];
@@ -623,52 +626,39 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
     const [userResult] = await pool.query(userQuery, userQueryParams);
 
     if (userResult.length === 0) {
-      return res
-        .status(404)
-        .json({ message: "User profile not found or not public." });
+      return res.status(404).json({ message: "User profile not found." });
     }
 
     let userProfile = userResult[0];
-
-    // تحويل isFollowedByMe إلى boolean
     userProfile.isFollowedByMe = Boolean(userProfile.isFollowedByMe);
 
-    // معالجة الحقول JSON
+    // معالجة JSON
     try {
-      userProfile.stats = userProfile.stats
-        ? JSON.parse(userProfile.stats)
-        : {};
-      userProfile.social_links = userProfile.social_links
-        ? JSON.parse(userProfile.social_links)
-        : {};
-      userProfile.portfolio = userProfile.portfolio
-        ? JSON.parse(userProfile.portfolio)
-        : [];
-    } catch (parseError) {
-      userProfile.stats = {};
-      userProfile.social_links = {};
-      userProfile.portfolio = [];
+      userProfile.stats = userProfile.stats ? JSON.parse(userProfile.stats) : {};
+      userProfile.social_links = userProfile.social_links ? JSON.parse(userProfile.social_links) : {};
+      userProfile.portfolio = userProfile.portfolio ? JSON.parse(userProfile.portfolio) : [];
+    } catch (e) {
+      userProfile.stats = {}; userProfile.social_links = {}; userProfile.portfolio = [];
     }
 
-    // --- 2. جلب Reels مع isLikedByMe و isFollowedByMe (اختياري لكن موصى به) ---
+    // --- 2. جلب Reels (تم إضافة الأعمدة الناقصة) ---
     const reelsQuery = `
       SELECT 
         r.id, 
         r.video_url, 
         r.thumbnail_url, 
+        r.caption,       -- ✅ جلب الوصف الحقيقي
         r.views_count,
+        r.shares_count,  -- ✅ جلب عدد المشاركات الحقيقي
+        r.created_at,    -- ✅ جلب تاريخ الإنشاء الحقيقي
         (SELECT COUNT(*) FROM reel_likes rl WHERE rl.reel_id = r.id) as likes_count,
         (SELECT COUNT(*) FROM reel_comments rc WHERE rc.reel_id = r.id) as comments_count,
         ${
           currentUserId
             ? `(SELECT COUNT(*) FROM reel_likes rl WHERE rl.reel_id = r.id AND rl.user_id = ?) > 0`
             : "FALSE"
-        } as isLikedByMe,
-        ${
-          currentUserId
-            ? `(SELECT COUNT(*) FROM user_follows uf WHERE uf.follower_id = ? AND uf.following_id = ?) > 0`
-            : "FALSE"
-        } as isFollowedByMe
+        } as isLikedByMe
+        -- ❌ تم حذف isFollowedByMe من هنا لأنه مكرر، سنستخدم القيمة من userProfile
       FROM reels r
       WHERE r.user_id = ? AND r.is_active = 1
       ORDER BY r.created_at DESC
@@ -676,20 +666,15 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
     `;
 
     const reelsQueryParams = currentUserId
-      ? [currentUserId, currentUserId, userIdToView, userIdToView]
+      ? [currentUserId, userIdToView]
       : [userIdToView];
 
     const [reelsResult] = await pool.query(reelsQuery, reelsQueryParams);
 
-    // تحويل القيم المنطقية
-    const reels = reelsResult.map((reel) => ({
-      ...reel,
-      isLikedByMe: Boolean(reel.isLikedByMe),
-      isFollowedByMe: Boolean(reel.isFollowedByMe),
-    }));
-
     // --- 3. جلب الخدمات والباقات ---
     let servicesResult = [];
+    let offersResult = [];
+    
     if (userProfile.role_name === "العارضة") {
       const servicesQuery = `
         SELECT sp.id, sp.title, sp.description, 
@@ -699,10 +684,7 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
         ORDER BY sp.created_at DESC;
       `;
       [servicesResult] = await pool.query(servicesQuery, [userIdToView]);
-    }
 
-    let offersResult = [];
-    if (userProfile.role_name === "العارضة") {
       const offersQuery = `
         SELECT id, title, description, price, type 
         FROM offers 
@@ -712,58 +694,60 @@ exports.getUserPublicProfile = asyncHandler(async (req, res) => {
       [offersResult] = await pool.query(offersQuery, [userIdToView]);
     }
 
-    // --- 4. جلب المنتجات الموسومة في الـ Reels (اختياري لكن متسق) ---
-    const reelIds = reels.map((r) => r.id);
-    let taggedProducts = [];
+    // --- 4. جلب المنتجات وربطها ---
+    const reelIds = reelsResult.map((r) => r.id);
+    const productMap = new Map();
+
     if (reelIds.length > 0) {
       const queryTags = `
         SELECT 
           rpt.reel_id, p.id, p.name, 
           (SELECT JSON_UNQUOTE(JSON_EXTRACT(pv.images, '$[0]'))
-          FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1
+           FROM product_variants pv WHERE pv.product_id = p.id LIMIT 1
           ) as image_url
         FROM reel_product_tags rpt 
         JOIN products p ON rpt.product_id = p.id 
         WHERE rpt.reel_id IN (?);
       `;
-      [taggedProducts] = await pool.query(queryTags, [reelIds]);
-    }
+      const [taggedProducts] = await pool.query(queryTags, [reelIds]);
 
-    const productMap = new Map();
-    for (const product of taggedProducts) {
-      const reelId = product.reel_id;
-      if (!productMap.has(reelId)) {
-        productMap.set(reelId, []);
+      for (const product of taggedProducts) {
+        const reelId = product.reel_id;
+        if (!productMap.has(reelId)) productMap.set(reelId, []);
+        const { reel_id, ...productDetails } = product;
+        productMap.get(reelId).push(productDetails);
       }
-      const { reel_id, ...productDetails } = product;
-      productMap.get(reelId).push(productDetails);
     }
 
-    const formattedReels = reels.map((reel) => ({
+    // تنسيق الريلز النهائي
+    const formattedReels = reelsResult.map((reel) => ({
       ...reel,
       tagged_products: productMap.get(reel.id) || [],
       userId: userIdToView,
       userName: userProfile.name,
       userAvatar: userProfile.profile_picture_url,
-      caption: "", // أو اجلبه من قاعدة البيانات إذا كان موجودًا
-      shares_count: 0, // أو اجلبه إذا كان مخزنًا
-      created_at: reel.created_at || new Date().toISOString(),
+      // ✅ استخدام القيم الحقيقية من قاعدة البيانات
+      caption: reel.caption || "", 
+      shares_count: reel.shares_count || 0,
+      created_at: reel.created_at,
+      // ✅ تمرير حالة المتابعة من البروفايل (لأنها نفس المستخدم)
+      isFollowedByMe: userProfile.isFollowedByMe, 
+      isLikedByMe: Boolean(reel.isLikedByMe),
     }));
 
     const responseData = {
-      profile: userProfile,
+      profile: userProfile, // يحتوي الآن على followers_count
       reels: formattedReels,
       services: servicesResult,
       offers: offersResult,
     };
+
     res.status(200).json(responseData);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Server error while fetching user profile" });
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
   }
 });
-
 // backend/controllers/userController.js
 
 /**
