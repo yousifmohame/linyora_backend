@@ -277,6 +277,23 @@ exports.commentOnReel = async (req, res) => {
   }
 };
 
+// @desc    زيادة عدد المشاهدات للفيديو
+// @route   POST /api/reels/:id/view
+// @access  Public
+exports.incrementViewCount = asyncHandler(async (req, res) => {
+  const reelId = req.params.id;
+
+  const [result] = await pool.query(
+    "UPDATE reels SET views_count = views_count + 1 WHERE id = ?",
+    [reelId]
+  );
+
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ message: "Reel not found" });
+  }
+
+  res.status(200).json({ message: "View counted successfully" });
+});
 
 exports.getReelComments = async (req, res) => {
   const reelId = req.params.id;
