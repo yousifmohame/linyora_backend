@@ -1,9 +1,6 @@
-// backend/controllers/paymentController.js
-
 const asyncHandler = require("express-async-handler");
 const pool = require("../config/db");
 const sendEmail = require("../utils/emailService");
-const templates = require("../utils/emailTemplates"); // تأكد من وجود هذا الملف
 const { getStripe } = require("../config/stripe");
 const { createOrderInternal } = require("../controllers/orderController");
 
@@ -12,9 +9,14 @@ const { createOrderInternal } = require("../controllers/orderController");
  * @route   POST /api/payments/create-subscription-session
  * @access  Private
  */
+
+/**
+ * @desc    Creates a Stripe Checkout session for a specific subscription plan.
+ */
 const createSubscriptionSession = asyncHandler(async (req, res) => {
   const stripe = getStripe();
-  if (!stripe) return res.status(500).json({ message: "Stripe is not initialized." });
+  if (!stripe)
+    return res.status(500).json({ message: "Stripe is not initialized." });
 
   const { planId } = req.body;
   const { id: userId, email: userEmail } = req.user;
@@ -28,7 +30,9 @@ const createSubscriptionSession = asyncHandler(async (req, res) => {
     [planId]
   );
   if (!plan) {
-    return res.status(404).json({ message: "الباقة المحددة غير متوفرة أو غير نشطة." });
+    return res
+      .status(404)
+      .json({ message: "الباقة المحددة غير متوفرة أو غير نشطة." });
   }
 
   const unitAmount = Math.round(parseFloat(plan.price) * 100);
@@ -85,59 +89,51 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
 
   try {
     const line_items = [];
-    const verifiedCartItems = []; 
+    const verifiedCartItems = []; // سنخزن هنا العناصر بعد التأكد من أسعارها
 
     // 1. التكرار عبر عناصر السلة لجلب السعر الحقيقي من قاعدة البيانات
     for (const item of cartItems) {
-      // التعامل مع المنتج سواء كان له variant_id أو منتج بسيط
-      let variant = null;
-      let productId = item.productId;
-
-      if (item.id) {
-         [[variant]] = await pool.query(
-          "SELECT id, price, product_id FROM product_variants WHERE id = ?",
-          [item.id]
-        );
-      } else {
-         // إذا لم يوجد variant_id، نبحث عن الـ Default Variant للمنتج
-         [[variant]] = await pool.query(
-            "SELECT id, price, product_id FROM product_variants WHERE product_id = ? LIMIT 1",
-            [item.productId]
-         );
-      }
+      // نفترض أن item.id هو معرف الـ Variant (الخيار)
+      // ونفترض أن لديك جدول product_variants يحتوي على السعر
+      const [[variant]] = await pool.query(
+        "SELECT id, price, product_id FROM product_variants WHERE id = ?",
+        [item.id] // نستخدم ID القادم من السلة للبحث
+      );
 
       if (!variant) {
-        throw new Error(`المنتج أو الخيار رقم ${item.id || item.productId} غير موجود.`);
+        throw new Error(`المنتج أو الخيار رقم ${item.id} غير موجود.`);
       }
 
-      // جلب اسم المنتج
+      // جلب اسم المنتج للعرض في الفاتورة (اختياري للتحسين)
       const [[product]] = await pool.query("SELECT name FROM products WHERE id = ?", [variant.product_id]);
       const productName = product ? product.name : "منتج";
 
+      // تحويل السعر من قاعدة البيانات (ولليس من req.body)
       const realUnitAmount = Math.round(Number(variant.price) * 100);
 
       line_items.push({
         price_data: {
           currency: "sar",
           product_data: {
-            name: `${productName}`, 
+            name: `${productName} (${item.name || 'خيار'})`, // استخدام الاسم الحقيقي
             images: item.image ? [item.image] : [],
           },
-          unit_amount: realUnitAmount, 
+          unit_amount: realUnitAmount, // ✅ السعر الآمن من قاعدة البيانات
         },
         quantity: item.quantity,
       });
 
+      // نضيف العنصر المؤكد للقائمة التي سنحفظها في الميتاداتا
       verifiedCartItems.push({
-        id: variant.id, // Variant ID الحقيقي
+        id: variant.id,
         productId: variant.product_id,
-        price: variant.price,
+        price: variant.price, // السعر الحقيقي
         quantity: item.quantity,
         name: productName
       });
     }
 
-    // إضافة تكلفة الشحن
+    // إضافة تكلفة الشحن (يجب أيضاً التحقق منها من قاعدة البيانات إذا كانت ثابتة، لكن سنقبلها الآن)
     if (Number(shipping_cost) > 0) {
       line_items.push({
         price_data: {
@@ -160,6 +156,7 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
         shippingAddressId,
         shipping_company_id: shipping_company_id || null,
         shipping_cost: shipping_cost || "0",
+        // نرسل القائمة التي تم التحقق منها
         cartItems: JSON.stringify(verifiedCartItems.map(item => ({
              id: item.id,
              productId: item.productId,
@@ -177,8 +174,11 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
   }
 });
 
+
+// --- ✨ دالة إنشاء جلسة دفع للاتفاقيات (الكود الذي أضفته صحيح) ---
+
 /**
- * @desc    Creates a Stripe Checkout session for a Service Package Tier (Agreements).
+ * @desc    Creates a Stripe Checkout session for a Service Package Tier.
  * @route   POST /api/payments/create-agreement-checkout-session
  * @access  Private (Merchant)
  */
@@ -188,16 +188,18 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
   const merchant_id = req.user.id;
 
   if (!package_tier_id || !product_id || !model_id) {
-    return res.status(400).json({ message: "Package, product, and model IDs are required." });
+    return res
+      .status(400)
+      .json({ message: "Package, product, and model IDs are required." });
   }
 
   try {
-    // جلب السعر وتفاصيل الباقة
+    // ✨ Fetch price and details from the NEW package tables
     const [[tier]] = await pool.query(
       `SELECT pt.price, sp.title as package_title 
-       FROM package_tiers pt
-       JOIN service_packages sp ON pt.package_id = sp.id
-       WHERE pt.id = ?`,
+             FROM package_tiers pt
+             JOIN service_packages sp ON pt.package_id = sp.id
+             WHERE pt.id = ?`,
       [package_tier_id]
     );
 
@@ -209,7 +211,7 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
       payment_method_types: ["card"],
       mode: "payment",
       payment_intent_data: {
-        capture_method: "manual", // حجز المبلغ فقط (Hold)
+        capture_method: "manual",
       },
       line_items: [
         {
@@ -217,7 +219,7 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
             currency: "sar",
             product_data: {
               name: `طلب تعاون: ${tier.package_title}`,
-              description: `حجز مبلغ لباقة خدمة (يتم الخصم عند قبول العرض)`,
+              description: `تفويض مبلغ لباقة خدمة من العارضة`,
             },
             unit_amount: Math.round(parseFloat(tier.price) * 100),
           },
@@ -228,11 +230,10 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
         sessionType: "agreement_authorization",
         merchant_id,
         model_id,
-        package_tier_id,
+        package_tier_id, // ✨ Pass the correct ID
         product_id,
       },
-      // تأكد من أن هذه الروابط صحيحة في تطبيقك
-      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success?session_id={CHECKOUT_SESSION_ID}&type=agreement`, 
+      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/agreesucces`,
       cancel_url: `${process.env.FRONTEND_URL}/dashboard/payment/cancel`,
     });
 
@@ -248,6 +249,8 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
  * @route   POST /api/payments/webhook
  * @access  Public
  */
+// linora-platform/backend/controllers/paymentController.js
+
 const handlePaymentWebhook = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const sig = req.headers["stripe-signature"];
@@ -257,33 +260,35 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
-    console.error(`⚠️  Webhook signature verification failed.`, err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+  } // --- ✅ [CORRECTED LOGIC] ---
 
-  // معالجة الحدث عند اكتمال جلسة الدفع
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
     const { sessionType } = session.metadata;
 
-    console.log(`Processing session ${session.id} type: ${sessionType}`);
+    console.log(
+      `Processing completed session ${session.id} of type: ${sessionType}`
+    );
 
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
 
-      // 1. حالة الاشتراكات
       if (sessionType === "subscription") {
         const { userId, planId } = session.metadata;
+
+        // ⚠️ يفضل دائماً أخذ تاريخ البداية والنهاية من Stripe لضمان عدم اختلاف الحساب
         const subscription = await stripe.subscriptions.retrieve(session.subscription);
+
         const startDate = new Date(subscription.current_period_start * 1000);
         const endDate = new Date(subscription.current_period_end * 1000);
 
         await connection.query(
           `INSERT INTO user_subscriptions 
-           (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
-           VALUES (?, 'active', ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
+            (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
+          VALUES (?, 'active', ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
               status = 'active',
               start_date = VALUES(start_date),
               end_date = VALUES(end_date),
@@ -291,78 +296,72 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
               plan_id = VALUES(plan_id)`,
           [userId, startDate, endDate, session.subscription, planId]
         );
-        console.log(`✅ Subscription activated for user ID: ${userId}`);
 
-      // 2. حالة شراء المنتجات
+        console.log(`✅ Subscription activated for user ID: ${userId}`);
       } else if (sessionType === "product_purchase") {
         const orderPayload = {
           customerId: Number(session.metadata.userId),
           cartItems: JSON.parse(session.metadata.cartItems),
           shippingAddressId: Number(session.metadata.shippingAddressId),
-          shipping_company_id: session.metadata.shipping_company_id ? Number(session.metadata.shipping_company_id) : null,
+          shipping_company_id: Number(session.metadata.shipping_company_id),
           shipping_cost: Number(session.metadata.shipping_cost),
           paymentMethod: "card",
           paymentStatus: "paid",
           stripe_session_id: session.id,
         };
-        
-        await createOrderInternal(orderPayload); // تم إزالة connection من هنا لأن createOrderInternal تدير اتصالها
-        console.log(`✅ Order created successfully: ${session.id}`);
-
-      // 3. حالة الترويج (Promotions)
+        await createOrderInternal(orderPayload, connection); // Pass connection for transaction
+        console.log(
+          `✅ Order created successfully from Stripe session: ${session.id}`
+        );
       } else if (sessionType === "product_promotion") {
+        // --- ✨ [NEW] Automatic Promotion Activation Logic ---
         const { productId, tierId, merchantId } = session.metadata;
-        const paymentIntentId = session.payment_intent;
+        const paymentIntentId = session.payment_intent; // 1. Fetch promotion duration
 
         const [[tier]] = await connection.query(
           "SELECT duration_days FROM promotion_tiers WHERE id = ?",
           [tierId]
         );
-        if (tier) {
-          await connection.query(
-            "INSERT INTO product_promotions (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) VALUES (?, ?, ?, 'active', ?, NOW(), NOW() + INTERVAL ? DAY)",
-            [productId, merchantId, tierId, paymentIntentId, tier.duration_days]
-          );
-          console.log(`✅ Promotion activated for product ${productId}`);
-        }
-
-      // 4. حالة الاتفاقيات (Agreements)
+        if (!tier)
+          throw new Error(`Promotion tier with ID ${tierId} not found.`); // 2. Insert and activate directly
+        await connection.query(
+        "INSERT INTO product_promotions (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) VALUES (?, ?, ?, 'active', ?, NOW(), NOW() + INTERVAL ? DAY)",
+        [productId, merchantId, tierId, paymentIntentId, tier.duration_days]
+      );
+        console.log(
+          `✅ Promotion for product ID ${productId} has been automatically activated for ${tier.duration_days} days.`
+        );
       } else if (sessionType === "agreement_authorization") {
-        const { merchant_id, model_id, package_tier_id, product_id } = session.metadata;
+        const { merchant_id, model_id, package_tier_id, product_id } =
+          session.metadata;
         const paymentIntentId = session.payment_intent;
 
         await connection.query(
-          `INSERT INTO agreements 
-           (merchant_id, model_id, package_tier_id, product_id, status, stripe_payment_intent_id, created_at) 
-           VALUES (?, ?, ?, ?, 'pending', ?, NOW())`,
-          [merchant_id, model_id, package_tier_id, product_id, paymentIntentId]
+          "INSERT INTO agreements (merchant_id, model_id, package_tier_id, product_id, status, stripe_payment_intent_id) VALUES (?, ?, ?, ?, ?, ?)",
+          [
+            merchant_id,
+            model_id,
+            package_tier_id,
+            product_id,
+            "pending",
+            paymentIntentId,
+          ]
         );
-        
-        // إشعار المودل بوجود طلب جديد (يمكنك تفعيل هذا الجزء)
-        /*
-        const [[modelUser]] = await connection.query("SELECT email FROM users WHERE id = ?", [model_id]);
-        if(modelUser) {
-           await sendEmail({
-             to: modelUser.email, 
-             subject: 'طلب تعاون جديد', 
-             html: templates.newAgreementRequest()
-           });
-        }
-        */
-        
-        console.log(`✅ Agreement created for merchant: ${merchant_id} -> model: ${model_id}`);
+        console.log(`✅ Agreement created for merchant: ${merchant_id}`);
       }
 
       await connection.commit();
     } catch (dbError) {
       await connection.rollback();
-      console.error(`❌ Webhook Logic Error:`, dbError);
+      console.error(
+        `❌ Webhook transaction error for session ${session.id}:`,
+        dbError
+      );
     } finally {
       connection.release();
     }
   }
 
-  // إلغاء الاشتراك
   if (event.type === "customer.subscription.deleted") {
     const subscription = event.data.object;
     try {
@@ -370,9 +369,9 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
         "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
         [subscription.id]
       );
-      console.log(`✅ Subscription cancelled: ${subscription.id}`);
+      console.log(`✅ Subscription cancelled for Sub ID: ${subscription.id}`);
     } catch (dbError) {
-      console.error("❌ DB Cancel Error:", dbError);
+      console.error("❌ DB error on subscription cancellation:", dbError);
     }
   }
 
@@ -381,6 +380,8 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
 
 /**
  * @desc    Cancels a user's subscription at the end of the current period.
+ * @route   POST /api/payments/cancel-subscription
+ * @access  Private
  */
 const cancelSubscription = asyncHandler(async (req, res) => {
   const stripe = getStripe();
@@ -393,7 +394,9 @@ const cancelSubscription = asyncHandler(async (req, res) => {
     );
 
     if (!sub || !sub.stripe_subscription_id) {
-      return res.status(404).json({ message: "لم يتم العثور على اشتراك فعال." });
+      return res
+        .status(404)
+        .json({ message: "لم يتم العثور على اشتراك فعال." });
     }
 
     await stripe.subscriptions.update(sub.stripe_subscription_id, {
@@ -403,45 +406,110 @@ const cancelSubscription = asyncHandler(async (req, res) => {
     await sendEmail({
       to: userEmail,
       subject: "تم تأكيد إلغاء تجديد اشتراكك",
-      html: `<div dir="rtl"><h3>تم إلغاء التجديد</h3><p>ستظل باقتك فعالة حتى ${new Date(sub.end_date).toLocaleDateString("ar-EG")}.</p></div>`,
+      html: `<div dir="rtl"><h3>تم استلام طلبك بإلغاء التجديد</h3><p>ستظل باقتك فعالة حتى تاريخ ${new Date(
+        sub.end_date
+      ).toLocaleDateString("ar-EG")}.</p></div>`,
     });
 
-    res.status(200).json({ message: "سيتم إلغاء اشتراكك في نهاية الفترة." });
+    res
+      .status(200)
+      .json({ message: "سيتم إلغاء اشتراكك في نهاية فترة الفوترة الحالية." });
   } catch (error) {
+    console.error("Error cancelling subscription:", error);
     res.status(500).json({ message: "فشل إلغاء الاشتراك." });
   }
 });
 
-// --- Helper Functions for Saved Cards ---
+/**
+ * @desc    Create a payment intent for an agreement
+ * @route   POST /api/payments/create-agreement-intent
+ * @access  Private (Merchant)
+ */
+const createAgreementPaymentIntent = async (req, res) => {
+  const stripe = getStripe();
+  const { offer_id } = req.body;
+  const merchant_id = req.user.id;
 
+  if (!offer_id) {
+    return res.status(400).json({ message: "Offer ID is required" });
+  }
+
+  try {
+    // 1. جلب سعر العرض من قاعدة البيانات
+    const [[offer]] = await pool.query(
+      "SELECT price FROM offers WHERE id = ? AND user_id = ?",
+      [offer_id, merchant_id]
+    );
+    if (!offer) {
+      return res
+        .status(404)
+        .json({ message: "Offer not found or does not belong to you." });
+    }
+
+    const amountInCents = Math.round(parseFloat(offer.price) * 100);
+
+    // 2. إنشاء نية الدفع في Stripe
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "sar", // أو أي عملة أخرى تستخدمها
+      capture_method: "manual", // ✨ أهم خطوة: لحجز المبلغ فقط دون سحبه
+      description: `Agreement fee for offer #${offer_id}`,
+    });
+
+    res.status(200).json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+    });
+  } catch (error) {
+    console.error("Error creating payment intent:", error);
+    res.status(500).json({ message: "Failed to create payment intent." });
+  }
+};
+
+// --- Helper: Get or Create Stripe Customer ---
 const getOrCreateCustomer = async (user) => {
   const stripe = getStripe();
+  
+  // 1. إذا كان لدينا الـ ID في التوكن أو الذاكرة
   if (user.stripe_customer_id) return user.stripe_customer_id;
 
+  // 2. التحقق من قاعدة البيانات
   const [[dbUser]] = await pool.query("SELECT stripe_customer_id FROM users WHERE id = ?", [user.id]);
-  if (dbUser && dbUser.stripe_customer_id) return dbUser.stripe_customer_id;
+  if (dbUser && dbUser.stripe_customer_id) {
+    return dbUser.stripe_customer_id;
+  }
 
+  // 3. إنشاء عميل جديد في Stripe
   const customer = await stripe.customers.create({
     email: user.email,
     name: user.name,
     metadata: { userId: user.id }
   });
 
+  // 4. حفظ الـ ID في قاعدة البيانات
   await pool.query("UPDATE users SET stripe_customer_id = ? WHERE id = ?", [customer.id, user.id]);
+  
   return customer.id;
 };
 
+/**
+ * @desc    Get all saved payment methods for the user
+ * @route   GET /api/payments/methods
+ * @access  Private
+ */
 const getPaymentMethods = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const customerId = await getOrCreateCustomer(req.user);
 
+  // جلب البطاقات المحفوظة
   const paymentMethods = await stripe.paymentMethods.list({
     customer: customerId,
     type: 'card',
   });
 
+  // جلب العميل لمعرفة البطاقة الافتراضية
   const customer = await stripe.customers.retrieve(customerId);
-  const defaultPm = customer.invoice_settings.default_payment_method;
+  const defaultPaymentMethodId = customer.invoice_settings.default_payment_method;
 
   const methods = paymentMethods.data.map(pm => ({
     id: pm.id,
@@ -449,12 +517,17 @@ const getPaymentMethods = asyncHandler(async (req, res) => {
     last4: pm.card.last4,
     exp_month: pm.card.exp_month,
     exp_year: pm.card.exp_year,
-    is_default: pm.id === defaultPm
+    is_default: pm.id === defaultPaymentMethodId
   }));
 
   res.json(methods);
 });
 
+/**
+ * @desc    Create a SetupIntent to save a card
+ * @route   POST /api/payments/setup-intent
+ * @access  Private
+ */
 const createSetupIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const customerId = await getOrCreateCustomer(req.user);
@@ -470,22 +543,30 @@ const createSetupIntent = asyncHandler(async (req, res) => {
 const createPaymentIntent = async (req, res) => {
   const stripe = getStripe();
   try {
+    // 1. لاحظ أننا نستخدم req.user.id الذي يأتي من التوكن (Token)
+    // هذا يتطلب أن يكون المسار محمياً بـ authMiddleware
     const userId = req.user.id; 
     const { amount, currency = 'sar', payment_method_id, merchant_id } = req.body;
 
+    // 2. جلب stripe_customer_id من قاعدة البيانات مباشرة
     const [[user]] = await pool.query("SELECT stripe_customer_id FROM users WHERE id = ?", [userId]);
+
     if (!user || !user.stripe_customer_id) {
-      return res.status(400).json({ message: "No Stripe Customer ID found." });
+      return res.status(400).json({ message: "No Stripe Customer ID found for this user." });
     }
 
+    const customerId = user.stripe_customer_id;
+
+    // 3. إنشاء PaymentIntent مع تمرير customerId الصحيح
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(amount * 100),
       currency: currency,
-      customer: user.stripe_customer_id,
+      customer: customerId, // ✅ الآن هذا الحقل مضمون الوجود
       payment_method: payment_method_id,
-      confirm: true, // ✅ محاولة الدفع فوراً للبطاقات المحفوظة
-      return_url: `${process.env.FRONTEND_URL}/payment/status`, // مطلوب عند confirm: true
-      metadata: { merchant_id }
+      confirm: false, 
+      metadata: {
+        merchant_id: merchant_id
+      }
     });
 
     res.json({
@@ -493,21 +574,33 @@ const createPaymentIntent = async (req, res) => {
       id: paymentIntent.id
     });
   } catch (error) {
+    console.error("Stripe Intent Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
 
+/**
+ * @desc    Delete a payment method
+ * @route   DELETE /api/payments/methods/:id
+ * @access  Private
+ */
 const deletePaymentMethod = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { id } = req.params;
+
   try {
     await stripe.paymentMethods.detach(id);
-    res.json({ message: "تم حذف البطاقة" });
+    res.json({ message: "تم حذف البطاقة بنجاح" });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 });
 
+/**
+ * @desc    Set default payment method
+ * @route   PUT /api/payments/methods/:id/default
+ * @access  Private
+ */
 const setDefaultPaymentMethod = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { id } = req.params;
@@ -520,22 +613,16 @@ const setDefaultPaymentMethod = asyncHandler(async (req, res) => {
   res.json({ message: "تم تحديث البطاقة الافتراضية" });
 });
 
-// هذا الجزء كان يفتقر للتصدير في الكود الأصلي
-const createAgreementPaymentIntent = asyncHandler(async (req, res) => {
-    // ... (الكود السابق صحيح) ...
-    // تم تركه للاختصار، إذا كنت تستخدم Checkout Session فلا داعي لهذا الجزء بشكل ملح
-});
-
 module.exports = {
   createSubscriptionSession,
   createCheckoutSessionForProducts,
   handlePaymentWebhook,
   cancelSubscription,
-  createAgreementCheckoutSession,
   createAgreementPaymentIntent,
-  getPaymentMethods,
-  createSetupIntent,
+  createAgreementCheckoutSession,
+  getPaymentMethods,      // ✨ جديد
+  createSetupIntent,      // ✨ جديد
   createPaymentIntent,
-  deletePaymentMethod,
-  setDefaultPaymentMethod
+  deletePaymentMethod,    // ✨ جديد
+  setDefaultPaymentMethod // 
 };
