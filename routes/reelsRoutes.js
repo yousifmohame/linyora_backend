@@ -33,6 +33,7 @@ router.post('/:id/like', protect, reelsController.likeReel);
 router.delete('/:id/like', protect, reelsController.unlikeReel);
 // --- (نهاية الإضافة) ---
 
+router.post('/:id/view', reelsController.incrementViewCount);
 
 // --- مسارات سنبنيها لاحقاً ---
 router.post('/:id/comment', protect, reelsController.commentOnReel); // إضافة تعليق
