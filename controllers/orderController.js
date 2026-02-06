@@ -226,7 +226,7 @@ const calculateAndRecordEarnings = async (orderId, connection) => {
 };
 /**
  * @private
- * @desc    الدالة الجوهرية لإنشاء الطلبات (مع فصل طلبات الدروبشيبينغ عن طلبات التاجر)
+ * @desc    الدالة الجوهرية لإنشاء الطلبات (مع إصلاح مشكلة Variant null)
  */
 exports.createOrderInternal = async (orderPayload) => {
   const {
@@ -252,10 +252,34 @@ exports.createOrderInternal = async (orderPayload) => {
     );
 
     // =========================================================================
-    // ✅ 1. (جديد) معالجة العروض الخاطفة: التحقق من الكمية وتحديث العداد
+    // ✅ 0. (إصلاح هام) معالجة المنتجات التي ليس لها Variant ID (المنتجات البسيطة)
     // =========================================================================
     for (const item of cartItems) {
-      // نبحث عما إذا كان هذا المنتج (Variant) جزءاً من عرض خاطف "نشط حالياً"
+      // إذا كان id (variant_id) غير موجود، لكن productId موجود
+      if (!item.id && item.productId) {
+        // نبحث عن أول variant افتراضي لهذا المنتج في قاعدة البيانات
+        const [variants] = await connection.query(
+          "SELECT id, price FROM product_variants WHERE product_id = ? LIMIT 1",
+          [item.productId]
+        );
+
+        if (variants.length > 0) {
+          item.id = variants[0].id; // تعيين الـ ID الافتراضي
+          // تحديث السعر إذا لم يكن مرسلاً، أو لضمان الدقة
+          // item.price = variants[0].price; 
+        } else {
+          throw new Error(`المنتج رقم ${item.productId} لا يحتوي على أي بيانات مخزون (Variants).`);
+        }
+      }
+    }
+    // =========================================================================
+
+    // =========================================================================
+    // ✅ 1. معالجة العروض الخاطفة: التحقق من الكمية وتحديث العداد
+    // =========================================================================
+    for (const item of cartItems) {
+      if (!item.id) continue; // حماية إضافية
+
       const [flashSaleInfo] = await connection.query(
         `SELECT fsp.id, fsp.sold_quantity, fsp.total_quantity, fsp.flash_price 
          FROM flash_sale_products fsp
@@ -264,32 +288,32 @@ exports.createOrderInternal = async (orderPayload) => {
            AND fsp.status = 'accepted'
            AND fs.is_active = 1 
            AND NOW() BETWEEN fs.start_time AND fs.end_time
-         FOR UPDATE`, // نستخدم FOR UPDATE لمنع التضارب في اللحظة نفسها
-        [item.id] // item.id هو variant_id
+         FOR UPDATE`, 
+        [item.id]
       );
 
-      // إذا وجدنا أن المنتج جزء من عرض نشط
       if (flashSaleInfo.length > 0) {
         const flashItem = flashSaleInfo[0];
-
-        // التحقق: هل الكمية المطلوبة ستتجاوز الكمية المخصصة للعرض؟
         if (flashItem.sold_quantity + item.quantity > flashItem.total_quantity) {
           throw new Error(
-            `عذراً، الكمية المتاحة في العرض الخاطف للمنتج ${item.name} قد نفذت أو غير كافية.`
+            `عذراً، الكمية المتاحة في العرض الخاطف للمنتج ${item.name || 'المحدد'} قد نفذت.`
           );
         }
-
-        // تحديث: زيادة الكمية المباعة في جدول العروض
         await connection.query(
           "UPDATE flash_sale_products SET sold_quantity = sold_quantity + ? WHERE id = ?",
           [item.quantity, flashItem.id]
         );
       }
     }
-    // =========================================================================
 
-    // 2. جلب تفاصيل المنتجات والموردين (كما هو في كودك الأصلي)
+    // 2. جلب تفاصيل المنتجات والموردين
+    // (الآن نضمن أن item.id ليس null بفضل الخطوة رقم 0)
     const variantIds = cartItems.map((item) => item.id);
+
+    // حماية في حال كانت المصفوفة فارغة (رغم استبعاد ذلك)
+    if (variantIds.length === 0) {
+        throw new Error("سلة الشراء فارغة أو البيانات غير صالحة.");
+    }
 
     const [variantsInfo] = await connection.query(
       `SELECT 
@@ -305,7 +329,6 @@ exports.createOrderInternal = async (orderPayload) => {
       [variantIds]
     );
 
-    // إنشاء خريطة لبيانات كل منتج
     const variantDetailsMap = {};
     variantsInfo.forEach((v) => {
       variantDetailsMap[v.variant_id] = {
@@ -319,7 +342,8 @@ exports.createOrderInternal = async (orderPayload) => {
 
     for (const item of cartItems) {
       const details = variantDetailsMap[item.id];
-      if (!details) throw new Error(`Product Variant ${item.id} not found.`);
+      // هنا كان يحدث الخطأ سابقاً، الآن لن يحدث إن شاء الله
+      if (!details) throw new Error(`بيانات المنتج (Variant ${item.id}) غير موجودة في النظام.`);
 
       const groupKey = `${details.merchant_id}_${details.supplier_id}`;
 
@@ -388,7 +412,7 @@ exports.createOrderInternal = async (orderPayload) => {
       // حساب الأرباح
       await calculateAndRecordEarnings(orderId, connection);
 
-      // --- إرسال الإشعارات ---
+      // --- إرسال الإشعارات (كما هي في كودك الأصلي) ---
       const [[merchant]] = await connection.query(
         "SELECT email, name FROM users WHERE id = ?",
         [group.merchantId]
