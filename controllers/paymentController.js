@@ -825,11 +825,48 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
   }
 
   // 3. معالجة تجديد الاشتراكات / الدفع الناجح (Web & Mobile)
+  // 3. ✅ [تعديل هام] معالجة الاشتراكات (إنشاء وتجديد)
   if (event.type === "invoice.payment_succeeded") {
     const invoice = event.data.object;
+    
+    // إذا كانت هذه الفاتورة تابعة لاشتراك
     if (invoice.subscription) {
-      console.log(`🔄 Subscription Renewed/Paid: ${invoice.subscription}`);
-      // يمكنك هنا تحديث تاريخ الانتهاء في قاعدة البيانات إذا كنت تخزنه
+      console.log(`🔄 Subscription Invoice Paid: ${invoice.subscription}`);
+
+      try {
+        // 1. جلب تفاصيل الاشتراك من Stripe للحصول على الميتاداتا والتواريخ
+        const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
+        
+        const { userId, planId } = subscription.metadata;
+        const startDate = new Date(subscription.current_period_start * 1000);
+        const endDate = new Date(subscription.current_period_end * 1000);
+
+        // تأكد من وجود البيانات قبل الحفظ
+        if (userId && planId) {
+            const connection = await pool.getConnection();
+            try {
+                await connection.query(
+                  `INSERT INTO user_subscriptions 
+                   (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
+                   VALUES (?, 'active', ?, ?, ?, ?)
+                   ON DUPLICATE KEY UPDATE
+                     status = 'active',
+                     start_date = VALUES(start_date),
+                     end_date = VALUES(end_date),
+                     stripe_subscription_id = VALUES(stripe_subscription_id),
+                     plan_id = VALUES(plan_id)`,
+                  [userId, startDate, endDate, subscription.id, planId]
+                );
+                console.log(`✅ Subscription Activated/Renewed for User ${userId}`);
+            } finally {
+                connection.release();
+            }
+        } else {
+            console.error("⚠️ Metadata missing in subscription object");
+        }
+      } catch (err) {
+        console.error("❌ Error saving subscription:", err.message);
+      }
     }
   }
 
