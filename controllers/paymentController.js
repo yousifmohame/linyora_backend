@@ -646,12 +646,15 @@ const createAgreementPaymentIntent = async (req, res) => {
 };
 
 /**
- * @desc    Creates PaymentIntent for Product Promotion (Mobile)
+ * @desc    Creates PaymentIntent for Product Promotion (Mobile Native)
  * @route   POST /api/payments/mobile/create-promotion-intent
  * @access  Private (Merchant)
  */
 const createMobilePromotionIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
+  
+  // استقبال البيانات كما يرسلها التطبيق (snake_case أو camelCase حسب الاتفاق)
+  // في كود Flutter الذي اعتمدناه، نحن نرسل: product_id و tier_id
   const { product_id, tier_id } = req.body;
   const merchant_id = req.user.id;
 
@@ -660,25 +663,39 @@ const createMobilePromotionIntent = asyncHandler(async (req, res) => {
   }
 
   try {
-    // 1. جلب سعر الباقة من قاعدة البيانات
+    // 1. التحقق من الباقة والسعر
     const [[tier]] = await pool.query(
-      "SELECT * FROM promotion_tiers WHERE id = ?",
+      "SELECT * FROM promotion_tiers WHERE id = ? AND is_active = 1",
       [tier_id]
     );
 
-    if (!tier) return res.status(404).json({ message: "Promotion tier not found." });
+    if (!tier) {
+      return res.status(404).json({ message: "Promotion tier not found." });
+    }
 
+    // 2. التحقق من أن المنتج يخص التاجر (خطوة أمان مهمة)
+    const [[product]] = await pool.query(
+      "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
+      [product_id, merchant_id]
+    );
+
+    if (!product) {
+        return res.status(404).json({ message: "Product not found or does not belong to you." });
+    }
+
+    // 3. تجهيز العميل والمبلغ
     const amountInCents = Math.round(parseFloat(tier.price) * 100);
     const customerId = await getOrCreateCustomer(req.user);
 
-    // 2. إنشاء PaymentIntent
+    // 4. إنشاء PaymentIntent
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "sar",
       customer: customerId,
       automatic_payment_methods: { enabled: true },
+      // ✅ الميتاداتا هنا هي السحر الذي يجعل الـ Webhook يعمل تلقائياً
       metadata: {
-        sessionType: "product_promotion", // مهم جداً للـ Webhook
+        sessionType: "product_promotion", // نفس النوع الذي ينتظره الـ Webhook
         merchantId: merchant_id,
         productId: product_id,
         tierId: tier_id,
@@ -686,6 +703,7 @@ const createMobilePromotionIntent = asyncHandler(async (req, res) => {
       },
     });
 
+    // 5. إرجاع المفتاح للتطبيق
     res.json({
       clientSecret: paymentIntent.client_secret,
       customer: customerId,
