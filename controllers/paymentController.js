@@ -819,6 +819,39 @@ async function processSuccessfulPayment(dataObject, stripe, sourceType) {
           [userId, startDate, endDate, subscriptionId, planId],
         );
       }
+    } else if (sessionType === "product_promotion") {
+        const { productId, tierId, merchantId } = dataObject.metadata;
+        
+        console.log(`🔍 Debug Promotion: Searching for Tier ID: ${tierId}, Product ID: ${productId}`);
+
+        // 1. البحث عن الباقة
+        const [[tier]] = await connection.query(
+          "SELECT * FROM promotion_tiers WHERE id = ?",
+          [tierId]
+        );
+
+        if (!tier) {
+            console.error(`❌ Error: Promotion Tier with ID ${tierId} NOT FOUND in database!`);
+        } else {
+            console.log(`✨ Tier Found: ${tier.name} (${tier.duration_days} days)`);
+
+            // 2. إدخال سجل الترويج
+            // (تأكد أن الجدول product_promotions موجود في قاعدة بياناتك)
+            await connection.query(
+                `INSERT INTO product_promotions 
+                 (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) 
+                 VALUES (?, ?, ?, 'active', ?, NOW(), DATE_ADD(NOW(), INTERVAL ? DAY))`,
+                [productId, merchantId, tierId, dataObject.id, tier.duration_days]
+            );
+
+            // 3. تحديث المنتج (اختياري ولكنه مفيد للعرض)
+            await connection.query(
+                "UPDATE products SET promotion_ends_at = DATE_ADD(NOW(), INTERVAL ? DAY) WHERE id = ?",
+                [tier.duration_days, productId]
+            );
+
+            console.log(`✅ SUCCESS: Product ${productId} promoted for ${tier.duration_days} days!`);
+        }
     } else if (sessionType === "product_purchase") {
       const orderPayload = {
         customerId: Number(dataObject.metadata.userId),
