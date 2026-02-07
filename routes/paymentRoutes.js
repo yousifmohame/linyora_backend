@@ -21,6 +21,7 @@ const {
   deletePaymentMethod,
   setDefaultPaymentMethod,
   createAgreementPaymentIntent,
+  createMobilePromotionIntent,
 } = require("../controllers/paymentController");
 
 const { protect, restrictTo } = require("../middleware/authMiddleware");
@@ -104,6 +105,13 @@ router.post(
   protect,
   restrictTo(2),
   createMobileAgreementIntent,
+);
+
+router.post(
+  "/mobile/create-promotion-intent",
+  protect,
+  restrictTo(2), 
+  createMobilePromotionIntent
 );
 
 // ==========================================
