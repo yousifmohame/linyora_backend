@@ -645,6 +645,58 @@ const createAgreementPaymentIntent = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Creates PaymentIntent for Product Promotion (Mobile)
+ * @route   POST /api/payments/mobile/create-promotion-intent
+ * @access  Private (Merchant)
+ */
+const createMobilePromotionIntent = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const { product_id, tier_id } = req.body;
+  const merchant_id = req.user.id;
+
+  if (!product_id || !tier_id) {
+    return res.status(400).json({ message: "Product ID and Tier ID are required." });
+  }
+
+  try {
+    // 1. جلب سعر الباقة من قاعدة البيانات
+    const [[tier]] = await pool.query(
+      "SELECT * FROM promotion_tiers WHERE id = ?",
+      [tier_id]
+    );
+
+    if (!tier) return res.status(404).json({ message: "Promotion tier not found." });
+
+    const amountInCents = Math.round(parseFloat(tier.price) * 100);
+    const customerId = await getOrCreateCustomer(req.user);
+
+    // 2. إنشاء PaymentIntent
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "sar",
+      customer: customerId,
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        sessionType: "product_promotion", // مهم جداً للـ Webhook
+        merchantId: merchant_id,
+        productId: product_id,
+        tierId: tier_id,
+        source: "mobile_app",
+      },
+    });
+
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      customer: customerId,
+    });
+
+  } catch (error) {
+    console.error("Mobile Promotion Error:", error);
+    res.status(500).json({ message: "Failed to create promotion payment." });
+  }
+});
+
 // ==========================================
 // 🔗 WEBHOOK HANDLER (The Core Logic)
 // ==========================================
@@ -805,6 +857,7 @@ module.exports = {
   createMobileSetupIntent,
   createMobileSubscription,
   createMobileAgreementIntent,
+  createMobilePromotionIntent,
 
   // Utilities
   handlePaymentWebhook,
