@@ -423,71 +423,85 @@ const createMobileSubscription = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    [Mobile] Create Agreement PaymentIntent
+ * @desc    [Mobile] Create Agreement PaymentIntent (Supports both Offers and Packages)
+ * @route   POST /api/payments/mobile/create-agreement-intent
+ * @access  Private (Merchant)
  */
 const createMobileAgreementIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
-  // تأكد من استقبال offer_id إذا كان الدفع لعرض، أو package_tier_id إذا كان لباقة
-  const { package_tier_id, offer_id, product_id, model_id } = req.body;
+  // نستقبل إما عرض خاص (offer_id) أو باقة (package_tier_id)
+  const { offer_id, package_tier_id, product_id, model_id } = req.body;
   const merchant_id = req.user.id;
 
-  if (!product_id || !model_id || (!package_tier_id && !offer_id)) {
-    return res.status(400).json({ message: "Missing required fields (package or offer)." });
+  // التحقق من البيانات الأساسية
+  if (!product_id || !model_id) {
+     return res.status(400).json({ message: "Product ID and Model ID are required." });
+  }
+  
+  // يجب توفر أحدهما على الأقل
+  if (!offer_id && !package_tier_id) {
+    return res.status(400).json({ message: "Either Offer ID or Package Tier ID is required." });
   }
 
   try {
     let amountInCents = 0;
     let description = "";
 
-    // 1. تحديد السعر بناءً على النوع (باقة أو عرض)
-    if (package_tier_id) {
-        const [[tier]] = await pool.query(
-          "SELECT pt.price FROM package_tiers pt WHERE pt.id = ?",
-          [package_tier_id]
-        );
-        if (!tier) return res.status(404).json({ message: "Tier not found." });
-        amountInCents = Math.round(parseFloat(tier.price) * 100);
-        description = "Agreement Package";
-    } else if (offer_id) {
+    // 1. حساب السعر بناءً على نوع الاتفاق
+    if (offer_id) {
+        // --- حالة العرض الخاص ---
         const [[offer]] = await pool.query(
-          "SELECT price FROM offers WHERE id = ?",
-          [offer_id]
+            "SELECT price FROM offers WHERE id = ?", 
+            [offer_id]
         );
         if (!offer) return res.status(404).json({ message: "Offer not found." });
+        
         amountInCents = Math.round(parseFloat(offer.price) * 100);
-        description = "Agreement Offer";
+        description = `Agreement for Offer #${offer_id}`;
+    } 
+    else if (package_tier_id) {
+        // --- حالة الباقة ---
+        const [[tier]] = await pool.query(
+            "SELECT price FROM package_tiers WHERE id = ?", 
+            [package_tier_id]
+        );
+        if (!tier) return res.status(404).json({ message: "Package Tier not found." });
+
+        amountInCents = Math.round(parseFloat(tier.price) * 100);
+        description = `Agreement for Package Tier #${package_tier_id}`;
     }
 
     const customerId = await getOrCreateCustomer(req.user);
 
-    // 2. إنشاء PaymentIntent
+    // 2. إنشاء نية الدفع في Stripe (مع الميتاداتا الناقصة)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "sar",
       customer: customerId,
-      capture_method: "manual", // حجز المبلغ فقط
+      capture_method: "manual", // حجز المبلغ
       automatic_payment_methods: { enabled: true },
       description: description,
-      // ✅ Metadata المصححة (تأكد أن الأسماء هنا تطابق الويب هوك)
+      // ✅✅✅ هذا هو الجزء الذي كان ينقصك!
       metadata: {
-        sessionType: "agreement_authorization",
+        sessionType: "agreement_authorization", // مفتاح الويب هوك
         merchant_id: merchant_id,
         model_id: model_id,
         product_id: product_id,
-        // نرسل أحدهما أو كلاهما، والويب هوك سيتعامل مع null
-        package_tier_id: package_tier_id || null, 
-        offer_id: offer_id || null, 
-        source: "mobile_app",
+        // نرسل القيم أو null كنص ليقبلها Stripe
+        offer_id: offer_id ? offer_id : null,
+        package_tier_id: package_tier_id ? package_tier_id : null,
+        source: "mobile_app"
       },
     });
 
-    res.json({
+    res.status(200).json({
       clientSecret: paymentIntent.client_secret,
       customer: customerId,
     });
+
   } catch (error) {
-    console.error("Mobile Agreement Error:", error);
-    res.status(500).json({ message: "Failed to create agreement payment." });
+    console.error("Error creating agreement intent:", error);
+    res.status(500).json({ message: "Failed to create payment intent." });
   }
 });
 
@@ -878,34 +892,33 @@ async function processSuccessfulPayment(dataObject, stripe, sourceType) {
       await createOrderInternal(orderPayload, connection);
       console.log(`📦 Order created for User: ${orderPayload.customerId}`);
     } else if (sessionType === "agreement_authorization") {
-        // استخراج البيانات من الميتاداتا
         const { merchant_id, model_id, product_id, package_tier_id, offer_id } = dataObject.metadata;
         
-        // تحديد ID عملية الدفع
+        // تحديد ID العملية
         const paymentId = sourceType === "payment_intent" ? dataObject.id : dataObject.payment_intent;
 
-        console.log(`🔍 Processing Agreement: Merchant ${merchant_id}, Model ${model_id}`);
+        console.log(`🤝 Processing Agreement: Merchant ${merchant_id} -> Model ${model_id}`);
 
-        // التأكد من أن القيم الفارغة تصل كـ NULL لقاعدة البيانات وليس نص "null" أو undefined
-        const safePackageTierId = package_tier_id && package_tier_id !== "null" ? package_tier_id : null;
-        const safeOfferId = offer_id && offer_id !== "null" ? offer_id : null;
+        // تنظيف القيم (Stripe قد يحول null إلى سلسلة نصية "null" أحياناً)
+        const safePackageId = (package_tier_id && package_tier_id !== "null") ? package_tier_id : null;
+        const safeOfferId = (offer_id && offer_id !== "null") ? offer_id : null;
 
-        // تنفيذ الاستعلام مع مراعاة العروض والباقات
+        // الحفظ في قاعدة البيانات
         await connection.query(
-            `INSERT INTO agreements 
-             (merchant_id, model_id, product_id, package_tier_id, offer_id, status, stripe_payment_intent_id, created_at) 
-             VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
-            [
-                merchant_id, 
-                model_id, 
-                product_id, 
-                safePackageTierId, // يمكن أن يكون null
-                safeOfferId,       // يمكن أن يكون null
-                paymentId
-            ]
+          `INSERT INTO agreements 
+           (merchant_id, model_id, package_tier_id, offer_id, product_id, status, stripe_payment_intent_id, created_at) 
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
+          [
+            merchant_id,
+            model_id,
+            safePackageId, // قد يكون null
+            safeOfferId,   // قد يكون null
+            product_id,
+            paymentId,
+          ]
         );
         
-        console.log(`✅ Agreement created successfully: ${merchant_id} -> ${model_id}`);
+        console.log(`✅ Agreement created successfully!`);
     }
 
     await connection.commit();
