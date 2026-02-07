@@ -788,9 +788,8 @@ const createMobilePromotionIntent = asyncHandler(async (req, res) => {
     res.status(500).json({ message: "Failed to create promotion payment." });
   }
 });
-
 // ==========================================
-// 🔗 WEBHOOK HANDLER (The Core Logic)
+// 🔗 WEBHOOK HANDLER (Corrected Logic)
 // ==========================================
 
 const handlePaymentWebhook = asyncHandler(async (req, res) => {
@@ -807,68 +806,166 @@ const handlePaymentWebhook = asyncHandler(async (req, res) => {
 
   console.log(`🔔 Webhook received: ${event.type}`);
 
-  // 1. معالجة Web Checkout (Web)
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    await processSuccessfulPayment(session, stripe, "checkout_session");
+  // -----------------------------------------------------------
+  // 1️⃣ السيناريو الأول: الاشتراكات (Web & Mobile)
+  // نعتمد حصرياً على الفاتورة لضمان وجود بيانات الاشتراك وتاريخ التجديد
+  // -----------------------------------------------------------
+  if (event.type === "invoice.payment_succeeded") {
+    const invoice = event.data.object;
+    
+    if (invoice.subscription) {
+      console.log(`🔄 Subscription Invoice Paid: ${invoice.subscription}`);
+
+      try {
+        // جلب تفاصيل الاشتراك للحصول على التواريخ والميتاداتا
+        const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
+        const { userId, planId } = subscription.metadata;
+
+        if (userId && planId) {
+            const startDate = new Date(subscription.current_period_start * 1000);
+            const endDate = new Date(subscription.current_period_end * 1000);
+
+            const connection = await pool.getConnection();
+            try {
+                await connection.query(
+                  `INSERT INTO user_subscriptions 
+                    (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
+                   VALUES (?, 'active', ?, ?, ?, ?)
+                   ON DUPLICATE KEY UPDATE
+                      status = 'active',
+                      start_date = VALUES(start_date),
+                      end_date = VALUES(end_date),
+                      stripe_subscription_id = VALUES(stripe_subscription_id),
+                      plan_id = VALUES(plan_id)`,
+                  [userId, startDate, endDate, subscription.id, planId]
+                );
+                console.log(`✅ Subscription Database Updated for User: ${userId}`);
+            } finally {
+                connection.release();
+            }
+        }
+      } catch (err) {
+        console.error("❌ Error syncing subscription to DB:", err.message);
+      }
+    }
+    // نتوقف هنا ولا نتابع للكود بالأسفل
+    return res.status(200).send();
   }
 
-  // 2. معالجة Mobile PaymentIntent (Mobile App)
+  // -----------------------------------------------------------
+  // 2️⃣ السيناريو الثاني: الدفع لمرة واحدة (منتجات، ترويج، اتفاقيات)
+  // -----------------------------------------------------------
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
 
-    // تأكد أن هذا الـ Intent لم يأتي من Web Checkout (لتجنب التكرار)
-    // Web Checkout لا يضع metadata مفصلة في الـ intent تلقائياً بنفس الشكل
+    // 🔥 تصحيح هام: إذا كان الدفع تابعاً لفاتورة (اشتراك)، نتجاهله هنا
+    // لأننا عالجناه في الخطوة 1 أعلاه.
+    if (paymentIntent.invoice) {
+        return res.status(200).send();
+    }
+
     if (paymentIntent.metadata && paymentIntent.metadata.sessionType) {
       await processSuccessfulPayment(paymentIntent, stripe, "payment_intent");
     }
   }
 
-  // 3. معالجة تجديد الاشتراكات / الدفع الناجح (Web & Mobile)
-  // 3. ✅ [تعديل هام] معالجة الاشتراكات (إنشاء وتجديد)
-  if (event.type === "invoice.payment_succeeded") {
-    const invoice = event.data.object;
+  // -----------------------------------------------------------
+  // 3️⃣ السيناريو الثالث: Web Checkout (للمنتجات والترويج عبر الويب)
+  // -----------------------------------------------------------
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
     
-    // إذا كانت هذه الفاتورة تابعة لاشتراك
-    if (invoice.subscription) {
-      console.log(`🔄 Subscription Invoice Paid: ${invoice.subscription}`);
+    // إذا كان Session لاشتراك، نتجاهله لأن invoice.payment_succeeded سيعالجه
+    if (session.mode === 'subscription') {
+        return res.status(200).send();
+    }
 
-      try {
-        // 1. جلب تفاصيل الاشتراك من Stripe للحصول على الميتاداتا والتواريخ
-        const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-        
-        const { userId, planId } = subscription.metadata;
-        const startDate = new Date(subscription.current_period_start * 1000);
-        const endDate = new Date(subscription.current_period_end * 1000);
+    await processSuccessfulPayment(session, stripe, "checkout_session");
+  }
 
-        // تأكد من وجود البيانات قبل الحفظ
-        if (userId && planId) {
-            const connection = await pool.getConnection();
-            try {
-                await connection.query(
-                  `INSERT INTO user_subscriptions 
-                   (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
-                   VALUES (?, 'active', ?, ?, ?, ?)
-                   ON DUPLICATE KEY UPDATE
-                     status = 'active',
-                     start_date = VALUES(start_date),
-                     end_date = VALUES(end_date),
-                     stripe_subscription_id = VALUES(stripe_subscription_id),
-                     plan_id = VALUES(plan_id)`,
-                  [userId, startDate, endDate, subscription.id, planId]
-                );
-                console.log(`✅ Subscription Activated/Renewed for User ${userId}`);
-            } finally {
-                connection.release();
-            }
-        } else {
-            console.error("⚠️ Metadata missing in subscription object");
-        }
-      } catch (err) {
-        console.error("❌ Error saving subscription:", err.message);
-      }
+  // 4. إلغاء الاشتراك
+  if (event.type === "customer.subscription.deleted") {
+    const subscription = event.data.object;
+    try {
+      await pool.query(
+        "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
+        [subscription.id]
+      );
+      console.log(`❌ Subscription Cancelled: ${subscription.id}`);
+    } catch (dbError) {
+      console.error("DB Error on cancellation:", dbError);
     }
   }
+
+  res.status(200).send();
+});
+
+// --- الدالة الموحدة (تم تنظيفها من منطق الاشتراكات) ---
+async function processSuccessfulPayment(dataObject, stripe, sourceType) {
+  const { sessionType } = dataObject.metadata;
+  console.log(`✅ Processing One-Time Payment: ${sessionType}`);
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. ترويج المنتجات
+    if (sessionType === "product_promotion") {
+        const { productId, tierId, merchantId } = dataObject.metadata;
+        const paymentId = sourceType === "payment_intent" ? dataObject.id : dataObject.payment_intent; // أو dataObject.id للـ checkout session حسب الإصدار
+
+        const [[tier]] = await connection.query("SELECT duration_days FROM promotion_tiers WHERE id = ?", [tierId]);
+        
+        if (tier) {
+            await connection.query(
+                `INSERT INTO product_promotions (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) VALUES (?, ?, ?, 'active', ?, NOW(), DATE_ADD(NOW(), INTERVAL ? DAY))`,
+                [productId, merchantId, tierId, dataObject.id, tier.duration_days]
+            );
+            // تحديث المنتج (اختياري)
+            // await connection.query("UPDATE products ...") 
+            console.log(`✅ Promotion activated for Product ${productId}`);
+        }
+    } 
+    
+    // 2. شراء منتجات
+    else if (sessionType === "product_purchase") {
+        const orderPayload = {
+            customerId: Number(dataObject.metadata.userId),
+            cartItems: JSON.parse(dataObject.metadata.cartItems),
+            shippingAddressId: Number(dataObject.metadata.shippingAddressId),
+            shipping_company_id: Number(dataObject.metadata.shipping_company_id),
+            shipping_cost: Number(dataObject.metadata.shipping_cost),
+            paymentMethod: "card",
+            paymentStatus: "paid",
+            stripe_session_id: dataObject.id,
+        };
+        await createOrderInternal(orderPayload, connection);
+        console.log(`✅ Order created for User: ${orderPayload.customerId}`);
+    } 
+    
+    // 3. الاتفاقيات
+    else if (sessionType === "agreement_authorization") {
+        const { merchant_id, model_id, product_id, package_tier_id, offer_id } = dataObject.metadata;
+        const paymentId = dataObject.id; // PaymentIntent ID
+
+        const safePackageId = (package_tier_id && package_tier_id !== "null") ? package_tier_id : null;
+        const safeOfferId = (offer_id && offer_id !== "null") ? offer_id : null;
+
+        await connection.query(
+          `INSERT INTO agreements (merchant_id, model_id, package_tier_id, offer_id, product_id, status, stripe_payment_intent_id, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
+          [merchant_id, model_id, safePackageId, safeOfferId, product_id, paymentId]
+        );
+        console.log(`✅ Agreement created: ${merchant_id} -> ${model_id}`);
+    }
+
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    console.error(`❌ Transaction Error (${sessionType}):`, error);
+  } finally {
+    connection.release();
+  }
+}
 
   // 4. إلغاء الاشتراك
   if (event.type === "customer.subscription.deleted") {
