@@ -478,7 +478,7 @@ const createMobileAgreementIntent = asyncHandler(async (req, res) => {
       amount: amountInCents,
       currency: "sar",
       customer: customerId,
-      capture_method: "manual", // حجز المبلغ
+      capture_method: "automatic", // حجز المبلغ
       automatic_payment_methods: { enabled: true },
       description: description,
       // ✅✅✅ هذا هو الجزء الذي كان ينقصك!
