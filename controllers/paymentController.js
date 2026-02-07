@@ -362,28 +362,63 @@ const createMobileSetupIntent = asyncHandler(async (req, res) => {
  */
 const createMobileSubscription = asyncHandler(async (req, res) => {
   const stripe = getStripe();
-  const { planId, paymentMethodId } = req.body;
+  const { planId, paymentMethodId } = req.body; // paymentMethodId قد يكون null
   const { id: userId } = req.user;
 
   try {
+    // 1. التحقق من الباقة
     const [[plan]] = await pool.query(
       "SELECT * FROM subscription_plans WHERE id = ? AND is_active = 1",
-      [planId],
+      [planId]
     );
     if (!plan) return res.status(404).json({ message: "الباقة غير موجودة." });
 
     const customerId = await getOrCreateCustomer(req.user);
 
-    // ربط البطاقة وجعلها افتراضية
+    // 2. [هام جداً] معالجة طريقة الدفع (البطاقة)
     if (paymentMethodId) {
-      await stripe.paymentMethods.attach(paymentMethodId, {
-        customer: customerId,
-      });
+      // أ) إذا أرسل التطبيق رقم البطاقة صراحةً
+      try {
+        await stripe.paymentMethods.attach(paymentMethodId, {
+          customer: customerId,
+        });
+      } catch (error) {
+        // نتجاهل الخطأ إذا كانت البطاقة مربوطة بالفعل
+        if (error.code !== 'resource_already_exists') throw error;
+      }
+      
+      // تعيينها كافتراضية
       await stripe.customers.update(customerId, {
         invoice_settings: { default_payment_method: paymentMethodId },
       });
+
+    } else {
+      // ب) إذا لم يرسل التطبيق رقم البطاقة (وهذا ما يحدث غالباً بعد SetupIntent)
+      // نبحث عن البطاقة التي أضافها العميل للتو في الخطوة السابقة
+      const customer = await stripe.customers.retrieve(customerId);
+      
+      if (!customer.invoice_settings.default_payment_method) {
+        // جلب آخر بطاقة مضافة
+        const paymentMethods = await stripe.paymentMethods.list({
+          customer: customerId,
+          type: 'card',
+          limit: 1, // هات أحدث واحدة
+        });
+
+        if (paymentMethods.data.length > 0) {
+          // تعيين أحدث بطاقة كافتراضية
+          await stripe.customers.update(customerId, {
+            invoice_settings: { default_payment_method: paymentMethods.data[0].id },
+          });
+        } else {
+          return res.status(400).json({ 
+            message: "لا توجد وسيلة دفع محفوظة. يرجى إضافة بطاقة أولاً." 
+          });
+        }
+      }
     }
 
+    // 3. إنشاء الاشتراك
     const unitAmount = Math.round(parseFloat(plan.price) * 100);
     const price = await stripe.prices.create({
       unit_amount: unitAmount,
@@ -401,8 +436,9 @@ const createMobileSubscription = asyncHandler(async (req, res) => {
         sessionType: "subscription",
         source: "mobile_app",
       },
+      // إعدادات الدفع التلقائي
+      payment_behavior: 'default_incomplete',
       payment_settings: {
-        payment_method_types: ["card"],
         save_default_payment_method: "on_subscription",
       },
       expand: ["latest_invoice.payment_intent"],
@@ -416,9 +452,13 @@ const createMobileSubscription = asyncHandler(async (req, res) => {
       clientSecret: paymentIntent ? paymentIntent.client_secret : null,
       status: subscription.status,
     });
+
   } catch (error) {
     console.error("Mobile Subscription Error:", error);
-    res.status(500).json({ message: "فشل في إنشاء الاشتراك." });
+    // إرجاع رسالة خطأ واضحة من Stripe إذا وجدت
+    res.status(500).json({ 
+        message: error.raw ? error.raw.message : "فشل في إنشاء الاشتراك." 
+    });
   }
 });
 
