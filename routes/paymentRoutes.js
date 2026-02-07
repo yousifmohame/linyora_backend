@@ -1,60 +1,139 @@
 const express = require("express");
 const router = express.Router();
 const {
+  // Web Controllers
   createSubscriptionSession,
-  cancelSubscription,
   createCheckoutSessionForProducts,
-  handlePaymentWebhook,
-  createAgreementPaymentIntent,
   createAgreementCheckoutSession,
+
+  // Mobile Controllers
+  createMobilePaymentIntent,
+  createMobileSetupIntent,
+  createMobileSubscription,
+  createMobileAgreementIntent,
+
+  // Shared / Utilities
+  handlePaymentWebhook,
+  cancelSubscription,
   getPaymentMethods,
   createSetupIntent,
   createPaymentIntent,
   deletePaymentMethod,
   setDefaultPaymentMethod,
+  createAgreementPaymentIntent,
 } = require("../controllers/paymentController");
+
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 
-// مسار للتاجر لإنشاء جلسة دفع
+// ==========================================
+// 🔗 WEBHOOK (Public)
+// ==========================================
+// يجب أن يكون في البداية
 router.post(
-  "/create-subscription",
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  handlePaymentWebhook,
+);
+
+// ==========================================
+// 🌐 WEB ROUTES (Stripe Checkout)
+// ==========================================
+
+// 1. اشتراكات التجار (Web)
+// متاح للتاجر (2) فقط
+router.post(
+  "/create-subscription-session",
   protect,
   restrictTo(2),
-  createSubscriptionSession
+  createSubscriptionSession,
 );
-router.post("/cancel-subscription", protect, restrictTo(2), cancelSubscription);
 
+// 2. شراء منتجات للعملاء (Web)
+// متاح للعميل (5) فقط
 router.post(
-  "/create-checkout-session",
+  "/create-product-checkout",
   protect,
   restrictTo(5),
-  createCheckoutSessionForProducts
+  createCheckoutSessionForProducts,
 );
 
-// ✨ المسار الجديد ✨
-router.post(
-  "/create-agreement-intent",
-  protect,
-  restrictTo(2),
-  createAgreementPaymentIntent
-);
-
-// ✨ أضف المسار الجديد
+// 3. دفع رسوم الاتفاقيات (Web)
+// التاجر (2) هو من يدفع للمودل/الانفلونسر
 router.post(
   "/create-agreement-checkout-session",
   protect,
-  restrictTo(2), // متاح للتاجر فقط
-  createAgreementCheckoutSession
+  restrictTo(2),
+  createAgreementCheckoutSession,
 );
 
-router.post("/webhook", handlePaymentWebhook);
+// ==========================================
+// 📱 MOBILE ROUTES (PaymentSheet / Native)
+// ==========================================
 
-router.get("/methods", protect, getPaymentMethods);
+// 4. شراء منتجات (Mobile App)
+// متاح للعميل (5) فقط
+router.post(
+  "/mobile/create-payment-intent",
+  protect,
+  restrictTo(5),
+  createMobilePaymentIntent,
+);
+
+// 5. اشتراكات (Mobile App - خطوة 1: SetupIntent)
+// متاح للتاجر (2)
+router.post(
+  "/mobile/create-setup-intent",
+  protect,
+  restrictTo(2),
+  createMobileSetupIntent,
+);
+
+// 6. اشتراكات (Mobile App - خطوة 2: Subscription)
+// متاح للتاجر (2)
+router.post(
+  "/mobile/create-subscription",
+  protect,
+  restrictTo(2),
+  createMobileSubscription,
+);
+
+// 7. دفع الاتفاقيات (Mobile App)
+// متاح للتاجر (2)
+router.post(
+  "/mobile/create-agreement-intent",
+  protect,
+  restrictTo(2),
+  createMobileAgreementIntent,
+);
+
+// ==========================================
+// 🛠 SHARED UTILITIES & MANAGEMENT
+// ==========================================
+
+// إلغاء الاشتراك (للتاجر 2)
+router.post("/cancel-subscription", protect, restrictTo(2), cancelSubscription);
+
+// إدارة البطاقات (متاح للكل من يدفع: التاجر 2 والعميل 5)
+// يمكنك إضافة (6) إذا كان المورد يدفع أيضاً
+router.get("/methods", protect, restrictTo(2, 5), getPaymentMethods);
+router.delete("/methods/:id", protect, restrictTo(2, 5), deletePaymentMethod);
+router.put(
+  "/methods/:id/default",
+  protect,
+  restrictTo(2, 5),
+  setDefaultPaymentMethod,
+);
+
+// Intent عام (للاختبار أو استخدامات أخرى)
 router.post("/setup-intent", protect, createSetupIntent);
 router.post("/create-intent", protect, createPaymentIntent);
-router.delete("/methods/:id", protect, deletePaymentMethod);
-router.put("/methods/:id/default", protect, setDefaultPaymentMethod);
 
-// مسار Webhook لاستقبال تأكيدات الدفع (بدون حماية توكن)
+// مسار قديم للاتفاقيات (إذا كان لا يزال مستخدماً في مكان ما)
+router.post(
+  "/create-agreement-intent",
+  protect,
+  restrictTo(2), // للتاجر
+  createAgreementPaymentIntent,
+);
 
 module.exports = router;
