@@ -4,6 +4,7 @@ const sendEmail = require('../utils/emailService');
 const templates = require("../utils/emailTemplates");
 
 // [GET] جلب جميع محادثات المستخدم
+// [GET] جلب جميع محادثات المستخدم (مع إصلاح عدد الرسائل غير المقروءة)
 exports.getConversations = async (req, res) => {
     const userId = req.user.id;
     try {
@@ -15,14 +16,20 @@ exports.getConversations = async (req, res) => {
                 IF(c.merchant_id = ?, u_model.profile_picture_url, u_merchant.profile_picture_url) AS participantAvatar,
                 u_other.is_online,
                 u_other.last_seen,
-                (SELECT body FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) as lastMessage
+                (SELECT body FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) as lastMessage,
+                
+                -- ✅ هذا هو السطر الجديد لحساب الرسائل غير المقروءة
+                (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id AND receiver_id = ? AND is_read = 0) AS unreadCount
+
              FROM conversations c
              JOIN users u_merchant ON c.merchant_id = u_merchant.id
              JOIN users u_model ON c.model_id = u_model.id
              JOIN users u_other ON u_other.id = IF(c.merchant_id = ?, c.model_id, c.merchant_id)
              WHERE c.merchant_id = ? OR c.model_id = ?
              ORDER BY c.updated_at DESC`,
-            [userId, userId, userId, userId, userId, userId]
+            
+            // ✅ لاحظ أننا أضفنا userId مرة إضافية في المصفوفة لتعويض علامة الاستفهام الجديدة
+            [userId, userId, userId, userId, userId, userId, userId] 
         );
         res.status(200).json(conversations);
     } catch (error) {
