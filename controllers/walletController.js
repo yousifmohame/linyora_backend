@@ -11,35 +11,63 @@ const templates = require("../utils/emailTemplates");
 exports.getMerchantWallet = async (req, res) => {
   const merchantId = req.user.id;
   try {
-    const query = `
-            SELECT
-                -- ✨ التصحيح هنا: نجمع كل المعاملات (أرباح + وسحوبات -) التي حالتها 'cleared' أو 'paid'
-                (SELECT COALESCE(SUM(amount), 0) 
-                 FROM wallet_transactions 
-                 WHERE user_id = ? 
-                 AND status IN ('cleared', 'paid')) AS balance,
-                 
-                -- الرصيد المعلق
-                (SELECT COALESCE(SUM(amount), 0) 
-                 FROM wallet_transactions 
-                 WHERE user_id = ? 
-                 AND status = 'pending_clearance') AS pending_clearance
-            FROM DUAL;
-        `;
-    const [[wallet]] = await pool.query(query, [merchantId, merchantId]);
-
-    // حساب إجمالي الأرباح (اختياري للعرض فقط)
-    // نجمع فقط المعاملات الموجبة من نوع 'earning'
-    const [[earningsData]] = await pool.query(
-      "SELECT COALESCE(SUM(amount), 0) as total FROM wallet_transactions WHERE user_id = ? AND type = 'earning'",
-      [merchantId]
+    // 1. جلب نسبة العمولة من الإعدادات
+    const [settings] = await pool.query(
+      "SELECT setting_value FROM platform_settings WHERE setting_key = 'commission_rate'"
     );
+    const commissionRate = parseFloat(settings[0]?.setting_value || 0);
+
+    // 2. حساب إجمالي المبيعات (Gross) للطلبات المكتملة فقط
+    // هذا يحل مشكلة الطلبات الملغية لأننا شرطنا o.status = 'completed'
+    const [salesData] = await pool.query(`
+      SELECT COALESCE(SUM(oi.price * oi.quantity), 0) as gross_sales
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE p.merchant_id = ?
+      AND o.status = 'completed'
+    `, [merchantId]);
+
+    const grossSales = parseFloat(salesData[0].gross_sales);
+
+    // 3. خصم عمولة المنصة للحصول على صافي الأرباح
+    const totalCommission = grossSales * (commissionRate / 100);
+    const netEarnings = grossSales - totalCommission;
+
+    // 4. حساب إجمالي السحوبات (Payouts) التي تمت بالفعل
+    // نجمع الطلبات التي حالتها 'paid' أو 'completed' من جدول طلبات السحب
+    const [payoutsData] = await pool.query(`
+      SELECT COALESCE(SUM(amount), 0) as total_withdrawn
+      FROM payout_requests
+      WHERE merchant_id = ? AND status IN ('paid', 'completed')
+    `, [merchantId]);
+
+    const totalWithdrawn = parseFloat(payoutsData[0].total_withdrawn);
+
+    // 5. الرصيد الحالي المتاح للسحب
+    // الرصيد = صافي الأرباح التاريخية - المبالغ التي تم سحبها
+    const currentBalance = netEarnings - totalWithdrawn;
+
+    // 6. حساب الرصيد المعلق (اختياري: للطلبات القائمة التي لم تكتمل أو تلغى بعد)
+    const [pendingData] = await pool.query(`
+      SELECT COALESCE(SUM(oi.price * oi.quantity), 0) as pending_gross
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE p.merchant_id = ?
+      AND o.status NOT IN ('completed', 'cancelled', 'returned', 'rejected', 'failed')
+    `, [merchantId]);
+
+    const pendingGross = parseFloat(pendingData[0].pending_gross);
+    // نعرض الرصيد المعلق "صافي" أيضاً (بعد خصم العمولة المتوقعة)
+    const pendingNet = pendingGross - (pendingGross * (commissionRate / 100));
 
     res.json({
-      balance: parseFloat(wallet.balance).toFixed(2),
-      pending_clearance: parseFloat(wallet.pending_clearance).toFixed(2),
-      total_earnings: parseFloat(earningsData.total).toFixed(2),
+      balance: currentBalance.toFixed(2),          // الرصيد القابل للسحب (صحيح 100%)
+      pending_clearance: pendingNet.toFixed(2),    // الرصيد تحت المعالجة
+      total_earnings: netEarnings.toFixed(2),      // إجمالي الأرباح التاريخية (الصافي)
     });
+
   } catch (error) {
     console.error("Error fetching merchant wallet data:", error);
     res.status(500).json({ message: "Server error" });
