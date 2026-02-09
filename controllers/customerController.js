@@ -161,12 +161,41 @@ exports.addProductReview = async (req, res) => {
   }
 
   try {
-    // يمكنك إضافة تحقق للتأكد من أن العميل اشترى هذا المنتج بالفعل
+    // 1. ✅ التحقق: هل قام المستخدم بتقييم هذا المنتج مسبقاً؟
+    const [existingReview] = await pool.query(
+      "SELECT id FROM product_reviews WHERE product_id = ? AND user_id = ?",
+      [productId, userId]
+    );
+
+    if (existingReview.length > 0) {
+      // 409 Conflict: يعني أن الطلب يتعارض مع الحالة الحالية للموارد (موجود مسبقاً)
+      return res.status(409).json({ 
+        message: "لقد قمت بتقييم هذا المنتج مسبقاً.",
+        code: "ALREADY_REVIEWED" // كود نستخدمه في الفرونت إند
+      });
+    }
+
+    // 2. (اختياري احترافي) التحقق من أن العميل اشترى المنتج بالفعل
+    /*
+    const [purchase] = await pool.query(
+       `SELECT id FROM order_items oi 
+        JOIN orders o ON oi.order_id = o.id 
+        WHERE oi.product_id = ? AND o.user_id = ? AND o.status = 'delivered'`,
+       [productId, userId]
+    );
+    if (purchase.length === 0) {
+       return res.status(403).json({ message: "يجب شراء المنتج واستلامه قبل التقييم." });
+    }
+    */
+
+    // 3. إضافة التقييم
     await pool.query(
-      "INSERT INTO product_reviews (product_id, user_id, rating, comment) VALUES (?, ?, ?, ?)",
+      "INSERT INTO product_reviews (product_id, user_id, rating, comment, created_at) VALUES (?, ?, ?, ?, NOW())",
       [productId, userId, rating, comment]
     );
+
     res.status(201).json({ message: "تمت إضافة تقييمك بنجاح!" });
+
   } catch (error) {
     console.error("Error adding product review:", error);
     res.status(500).json({ message: "فشل إضافة التقييم." });
