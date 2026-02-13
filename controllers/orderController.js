@@ -5,7 +5,7 @@ const asyncHandler = require("express-async-handler");
 const sendEmail = require("../utils/emailService");
 const templates = require("../utils/emailTemplates");
 const { recordTransaction } = require("./walletController"); // 👈 Wallet engine import
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { getStripe } = require("../config/stripe");
 
 // ===================================================================================
 //  HELPER FUNCTIONS 🛠️
@@ -611,6 +611,7 @@ exports.createCodOrder = asyncHandler(async (req, res) => {
 });
 
 exports.createOrderFromIntent = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
   const {
     paymentIntentId,
     cartItems,
