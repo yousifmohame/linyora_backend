@@ -712,7 +712,7 @@ async function processSuccessfulPayment(dataObject, stripe, sourceType) {
       // 2. 🔥 النظام المالي للاتفاقيات:
       // جلب نسبة العمولة للاتفاقيات
       const [[settings]] = await connection.query(
-        "SELECT setting_value FROM platform_settings WHERE setting_key = 'commission_rate'",
+        "SELECT setting_value FROM platform_settings WHERE setting_key = 'agreement_commission_rate'",
       );
       const commissionRate = (Number(settings?.setting_value) || 10) / 100;
 

@@ -627,9 +627,9 @@ exports.getSupplierOrderDetails = asyncHandler(async (req, res) => {
 //  🔥 FINANCIAL ENGINE (النسخة الشاملة: تسجيل الخصومات في كل الحالات)
 // ===================================================================================
 const calculateAndRegisterEarnings = async (orderId, connection) => {
-  console.log(`💰 [Finance] Starting Split Calculation for Order #${orderId}`);
+  console.log(`💰 [Finance] Starting Logic Calculation for Order #${orderId}`);
 
-  // 1. بيانات الطلب
+  // 1. بيانات الطلب الأساسية
   const [[orderMeta]] = await connection.query(
     "SELECT payment_method, shipping_cost, shipping_company_id FROM orders WHERE id = ?",
     [orderId],
@@ -638,7 +638,7 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
   const isCOD = orderMeta.payment_method === "cod";
   const globalShippingCost = Number(orderMeta.shipping_cost || 0);
 
-  // 2. الإعدادات
+  // 2. إعدادات المنصة
   const [settings] = await connection.query(
     "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'shipping_commission_rate', 'clearance_days')",
   );
@@ -650,10 +650,11 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
   const commissionRate = (config.commission_rate || 10) / 100;
   const shippingCommRate = (config.shipping_commission_rate || 10) / 100;
   const clearanceDays = config.clearance_days || 14;
+
   const availableAt = new Date();
   availableAt.setDate(availableAt.getDate() + clearanceDays);
 
-  // 3. جلب العناصر
+  // 3. جلب تفاصيل العناصر
   const [items] = await connection.query(
     `SELECT oi.*, p.merchant_id, p.name as product_name, 
             sp.supplier_id, spv.cost_price 
@@ -667,122 +668,217 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
     [orderId],
   );
 
+  // تحديد المورد الأساسي (مستخدم لأغراض الشحن)
   const firstSupplierItem = items.find((i) => i.supplier_id);
   const defaultShippingOwnerId = firstSupplierItem
     ? firstSupplierItem.supplier_id
     : items[0]?.merchant_id;
 
-  // --- دالة مساعدة لتسجيل العمليات (إجمالي + خصم) ---
-  const registerSplitTransaction = async (
-    userId,
-    grossAmount,
-    commissionAmount,
-    desc,
-    typeOverride = "sale_earning",
-  ) => {
-    if (isCOD) {
-      // COD: نخصم العمولة فقط (لأن التاجر معه الكاش)
-      await recordTransaction(
-        {
-          userId,
-          amount: -commissionAmount, // بالسالب
-          type: "cod_commission_deduction",
-          status: "cleared", // دين حال
-          paymentMethod: "system",
-          referenceType: "order",
-          referenceId: orderId,
-          description: `خصم عمولة منصة (${desc})`,
-          availableAt: null,
-        },
-        connection,
-      );
-    } else {
-      // Card: نسجل الإيداع الكلي ثم نخصم العمولة (لتوحيد التقارير)
-
-      // 1. إيداع المبلغ الكلي (إجمالي المبيعات)
-      await recordTransaction(
-        {
-          userId,
-          amount: grossAmount,
-          type: typeOverride,
-          status: "pending",
-          paymentMethod: "system",
-          referenceType: "order",
-          referenceId: orderId,
-          description: `إجمالي مبيعات (${desc})`,
-          availableAt,
-        },
-        connection,
-      );
-
-      // 2. خصم العمولة (هنا يتم تسجيل الخصم الذي كنت تبحث عنه)
-      await recordTransaction(
-        {
-          userId,
-          amount: -commissionAmount,
-          type: "commission_deduction", // نوع جديد لتمييزه عن COD
-          status: "pending", // معلق لأنه يخصم من رصيد معلق
-          paymentMethod: "system",
-          referenceType: "order",
-          referenceId: orderId,
-          description: `خصم عمولة منصة (${desc})`,
-          availableAt, // يتحرر الخصم مع تحرر المبلغ الأصلي
-        },
-        connection,
-      );
-    }
-  };
-
-  // 4. معالجة المنتجات
+  // -------------------------------------------------------------
+  // 🔥 المعالجة المالية للمنتجات (Product Processing)
+  // -------------------------------------------------------------
   for (const item of items) {
     const qty = Number(item.quantity);
     const sellingPriceTotal = Number(item.price) * qty;
 
     if (item.supplier_id && item.cost_price) {
-      // --- دروبشيبينغ ---
+      // ✅ حالة الدروبشيبينغ (Dropshipping)
       const costPriceTotal = Number(item.cost_price) * qty;
-      const supplierCommission = costPriceTotal * commissionRate;
+      const supplierPlatformFee = costPriceTotal * commissionRate; // عمولة المنصة على المورد
+      const grossProfit = sellingPriceTotal - costPriceTotal; // ربح التاجر
+      const merchantPlatformFee = grossProfit * commissionRate; // عمولة المنصة على التاجر
+      const netMerchantProfit = grossProfit - merchantPlatformFee; // صافي ربح التاجر
 
-      // المورد: (له التكلفة، عليه عمولة)
-      await registerSplitTransaction(
-        item.supplier_id,
-        costPriceTotal,
-        supplierCommission,
-        `منتج: ${item.product_name}`,
-      );
+      if (isCOD) {
+        // 🔥🔥 منطق COD الجديد (المورد معه الكاش) 🔥🔥
 
-      // التاجر: (له الربح، عليه عمولة)
-      const grossProfit = sellingPriceTotal - costPriceTotal;
-      const merchantCommission = grossProfit * commissionRate;
+        // 1. المورد (معه الكاش): عليه مديونيات (عمولة المنصة + ربح التاجر)
+        // نسجل عليه خصم فوري (Cleared Deduction) بقيمة إجمالي المبلغ الذي يجب أن يدفعه
+        const totalDebtOnSupplier =
+          supplierPlatformFee + netMerchantProfit + merchantPlatformFee;
 
-      await registerSplitTransaction(
-        item.merchant_id,
-        grossProfit,
-        merchantCommission,
-        `ربح بيع: ${item.product_name}`,
-      );
+        // تفصيل الديون على المورد:
+        // أ) خصم عمولة المنصة الخاصة به
+        await recordTransaction(
+          {
+            userId: item.supplier_id,
+            amount: -supplierPlatformFee,
+            type: "cod_commission_deduction",
+            status: "cleared", // دين مستحق فوراً
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `خصم عمولة منصة (COD) - منتج: ${item.product_name}`,
+            availableAt: null,
+          },
+          connection,
+        );
+
+        // ب) خصم قيمة ربح التاجر (لأن المورد أخذها كاش ويجب أن يعطيها للمنصة لتعطيها للتاجر)
+        // ملاحظة: نسجلها كـ "تحويل مستحق للتاجر"
+        await recordTransaction(
+          {
+            userId: item.supplier_id,
+            amount: -grossProfit, // نسحب منه كامل الربح (شامل عمولة التاجر) لأن المنصة ستوزعها
+            type: "merchant_profit_transfer",
+            status: "cleared",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `تحويل مستحق للتاجر (COD) - منتج: ${item.product_name}`,
+            availableAt: null,
+          },
+          connection,
+        );
+
+        // 2. التاجر (لم يستلم شيئاً): له أرباح (Pending)
+        // نسجل له صافي الربح (بعد خصم عمولة المنصة منه)
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: netMerchantProfit,
+            type: "sale_earning", // ربح بيع
+            status: "pending", // معلق حتى يسدد المورد أو تنتهي فترة الضمان
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `ربح دروبشيبينغ (COD) - منتج: ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+
+        // (اختياري) تسجيل عمولة المنصة على التاجر كقيد صوري للمحاسبة فقط
+        // لا نخصمها من الرصيد هنا لأننا سجلنا "الصافي" للتاجر أعلاه
+      } else {
+        // ✅ حالة الدفع الإلكتروني (Visa/Card) - المنصة معها الكاش
+        // المورد: له التكلفة - العمولة
+        await recordTransaction(
+          {
+            userId: item.supplier_id,
+            amount: costPriceTotal,
+            type: "sale_earning",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `تكلفة منتج (Card): ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+
+        await recordTransaction(
+          {
+            userId: item.supplier_id,
+            amount: -supplierPlatformFee,
+            type: "commission_deduction",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `عمولة منصة: ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+
+        // التاجر: له الربح - العمولة
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: grossProfit,
+            type: "sale_earning",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `ربح بيع (Card): ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: -merchantPlatformFee,
+            type: "commission_deduction",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `عمولة منصة: ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+      }
     } else {
-      // --- منتج عادي ---
+      // ✅ حالة التاجر العادي (منتج خاص به)
       const merchantCommission = sellingPriceTotal * commissionRate;
 
-      await registerSplitTransaction(
-        item.merchant_id,
-        sellingPriceTotal,
-        merchantCommission,
-        `منتج: ${item.product_name}`,
-      );
+      if (isCOD) {
+        // التاجر معه الكاش: نخصم منه العمولة فوراً (مديونية)
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: -merchantCommission,
+            type: "cod_commission_deduction",
+            status: "cleared",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `عمولة منصة (COD): ${item.product_name}`,
+            availableAt: null,
+          },
+          connection,
+        );
+      } else {
+        // المنصة معها الكاش: إيداع للتاجر (معلق) ثم خصم عمولة (معلق)
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: sellingPriceTotal,
+            type: "sale_earning",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `مبيعات (Card): ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+
+        await recordTransaction(
+          {
+            userId: item.merchant_id,
+            amount: -merchantCommission,
+            type: "commission_deduction",
+            status: "pending",
+            paymentMethod: "system",
+            referenceType: "order",
+            referenceId: orderId,
+            description: `عمولة منصة: ${item.product_name}`,
+            availableAt,
+          },
+          connection,
+        );
+      }
     }
   }
 
-  // =========================================================
-  // 5. معالجة الشحن (تطبيق نفس المنطق)
-  // =========================================================
+  // -------------------------------------------------------------
+  // 🔥 المعالجة المالية للشحن (Shipping Processing)
+  // -------------------------------------------------------------
 
   const processShippingTransaction = async (ownerId, cost, descName) => {
     const shipFee = cost * shippingCommRate;
 
     if (isCOD) {
-      // COD: خصم فقط
+      // COD: صاحب شركة الشحن (غالباً المورد) استلم الكاش
+      // نخصم منه عمولة المنصة على الشحن فوراً (مديونية)
       await recordTransaction(
         {
           userId: ownerId,
@@ -792,15 +888,14 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
           paymentMethod: "system",
           referenceType: "order",
           referenceId: orderId,
-          description: `خصم عمولة شحن (${descName})`,
+          description: `عمولة منصة على الشحن (COD) - ${descName}`,
           availableAt: null,
         },
         connection,
       );
     } else {
-      // Card: إيداع شحن + خصم عمولة
-
-      // 1. إيداع الشحن
+      // Card: المنصة معها الكاش
+      // إيداع تكلفة الشحن للمورد (معلق) + خصم العمولة (معلق)
       await recordTransaction(
         {
           userId: ownerId,
@@ -810,13 +905,12 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
           paymentMethod: "system",
           referenceType: "order",
           referenceId: orderId,
-          description: `عائد شحن (${descName})`,
+          description: `عائد شحن - ${descName}`,
           availableAt,
         },
         connection,
       );
 
-      // 2. خصم العمولة
       await recordTransaction(
         {
           userId: ownerId,
@@ -826,7 +920,7 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
           paymentMethod: "system",
           referenceType: "order",
           referenceId: orderId,
-          description: `خصم عمولة شحن (${descName})`,
+          description: `عمولة شحن - ${descName}`,
           availableAt,
         },
         connection,
@@ -834,7 +928,7 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
     }
   };
 
-  // أ) البحث في جدول الاختيارات
+  // معالجة شركات الشحن (نفس المنطق القديم مع استدعاء الدالة المعدلة أعلاه)
   const [shippingSelections] = await connection.query(
     "SELECT * FROM order_shipping_selections WHERE order_id = ?",
     [orderId],
@@ -859,8 +953,8 @@ const calculateAndRegisterEarnings = async (orderId, connection) => {
     }
   }
 
-  // ب) الخطة البديلة (Fallback)
   if (!shippingHandled && globalShippingCost > 0) {
+    // تحديد من هو صاحب الشحن (في الغالب المورد في حالة الدروبشيبينغ)
     let shippingOwnerId = defaultShippingOwnerId;
     let companyName = "شحن عام";
 
