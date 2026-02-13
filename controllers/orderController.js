@@ -647,6 +647,7 @@ exports.createOrderFromIntent = asyncHandler(async (req, res) => {
  * @desc    إنشاء طلب بعد الدفع بالبطاقة (يسجل الأرباح فوراً)
  */
 exports.createOrderFromIntent = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
   const {
     paymentIntentId,
     cartItems,
