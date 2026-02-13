@@ -1,3 +1,4 @@
+// routes/paymentRoutes.js
 const express = require("express");
 const router = express.Router();
 const {
@@ -11,9 +12,9 @@ const {
   createMobileSetupIntent,
   createMobileSubscription,
   createMobileAgreementIntent,
+  createMobilePromotionIntent,
 
   // Shared / Utilities
-  handlePaymentWebhook,
   cancelSubscription,
   getPaymentMethods,
   createSetupIntent,
@@ -21,20 +22,15 @@ const {
   deletePaymentMethod,
   setDefaultPaymentMethod,
   createAgreementPaymentIntent,
-  createMobilePromotionIntent,
 } = require("../controllers/paymentController");
 
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 
 // ==========================================
-// 🔗 WEBHOOK (Public)
+// 🚨 ملاحظة هامة:
+// تم نقل مسار الـ Webhook إلى ملف server.js الرئيسي
+// لضمان عمله قبل express.json() وتجنب أخطاء التوقيع.
 // ==========================================
-// يجب أن يكون في البداية
-router.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  handlePaymentWebhook,
-);
 
 // ==========================================
 // 🌐 WEB ROUTES (Stripe Checkout)
@@ -107,11 +103,13 @@ router.post(
   createMobileAgreementIntent,
 );
 
+// 8. ترويج المنتجات (Mobile App)
+// متاح للتاجر (2)
 router.post(
   "/mobile/create-promotion-intent",
   protect,
-  restrictTo(2), 
-  createMobilePromotionIntent
+  restrictTo(2),
+  createMobilePromotionIntent,
 );
 
 // ==========================================
@@ -122,7 +120,7 @@ router.post(
 router.post("/cancel-subscription", protect, restrictTo(2), cancelSubscription);
 
 // إدارة البطاقات (متاح للكل من يدفع: التاجر 2 والعميل 5)
-// يمكنك إضافة (6) إذا كان المورد يدفع أيضاً
+// يمكن إضافة أدوار أخرى هنا إذا لزم الأمر
 router.get("/methods", protect, restrictTo(2, 5), getPaymentMethods);
 router.delete("/methods/:id", protect, restrictTo(2, 5), deletePaymentMethod);
 router.put(
@@ -136,11 +134,11 @@ router.put(
 router.post("/setup-intent", protect, createSetupIntent);
 router.post("/create-intent", protect, createPaymentIntent);
 
-// مسار قديم للاتفاقيات (إذا كان لا يزال مستخدماً في مكان ما)
+// مسار قديم للاتفاقيات (احتياطي)
 router.post(
   "/create-agreement-intent",
   protect,
-  restrictTo(2), // للتاجر
+  restrictTo(2),
   createAgreementPaymentIntent,
 );
 

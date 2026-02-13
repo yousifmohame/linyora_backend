@@ -4,7 +4,8 @@ const sendEmail = require("../utils/emailService");
 const { getStripe } = require("../config/stripe");
 const asyncHandler = require("express-async-handler");
 const templates = require("../utils/emailTemplates");
-const bcrypt = require('bcryptjs'); // 👈 أضف هذا السطر
+const bcrypt = require("bcryptjs"); // 👈 أضف هذا السطر
+const { recordTransaction } = require("./walletController");
 
 exports.getDashboardAnalytics = async (req, res) => {
   try {
@@ -40,19 +41,21 @@ exports.getDashboardAnalytics = async (req, res) => {
           ORDER BY date ASC
       `),
       pool.query(
-        "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'shipping_commission_rate')"
+        "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'shipping_commission_rate')",
       ),
     ]);
 
     // --- ✨ معالجة البيانات بأمان (Safety Checks) ---
 
     // 1. استخراج الإعدادات (مع حماية ضد الجداول الفارغة)
-    const settingsRows = platformSettingsResult ? platformSettingsResult[0] : [];
-    
+    const settingsRows = platformSettingsResult
+      ? platformSettingsResult[0]
+      : [];
+
     const getSettingValue = (key) => {
-        if (!Array.isArray(settingsRows)) return 0;
-        const setting = settingsRows.find(s => s.setting_key === key);
-        return setting ? parseFloat(setting.setting_value) || 0 : 0;
+      if (!Array.isArray(settingsRows)) return 0;
+      const setting = settingsRows.find((s) => s.setting_key === key);
+      return setting ? parseFloat(setting.setting_value) || 0 : 0;
     };
 
     const commissionRate = getSettingValue("commission_rate");
@@ -60,10 +63,14 @@ exports.getDashboardAnalytics = async (req, res) => {
 
     // 2. حساب إجمالي الإيرادات
     const [totalRevenueResult] = await pool.query(
-      "SELECT SUM(total_amount) as totalRevenue FROM orders WHERE status = 'completed'"
+      "SELECT SUM(total_amount) as totalRevenue FROM orders WHERE status = 'completed'",
     );
     // حماية: إذا لم توجد طلبات، القيمة ستكون null، نحولها لـ 0
-    const totalRevenue = (totalRevenueResult && totalRevenueResult[0] && totalRevenueResult[0].totalRevenue) || 0;
+    const totalRevenue =
+      (totalRevenueResult &&
+        totalRevenueResult[0] &&
+        totalRevenueResult[0].totalRevenue) ||
+      0;
 
     // 3. حساب الأرباح (Platform Earnings)
     const [commissions] = await pool.query(
@@ -72,24 +79,42 @@ exports.getDashboardAnalytics = async (req, res) => {
           SUM(COALESCE(o.shipping_cost, 0) * (? / 100)) as shipping_commission
        FROM orders o
        WHERE o.status = 'completed'`,
-      [commissionRate, shippingCommissionRate]
+      [commissionRate, shippingCommissionRate],
     );
 
     const platformEarnings =
-      ((commissions && commissions[0] && commissions[0].product_commission) || 0) +
-      ((commissions && commissions[0] && commissions[0].shipping_commission) || 0);
+      ((commissions && commissions[0] && commissions[0].product_commission) ||
+        0) +
+      ((commissions && commissions[0] && commissions[0].shipping_commission) ||
+        0);
 
     // 4. معالجة بيانات المبيعات
     // حماية: التأكد أن salesDataResult[0] هو مصفوفة
-    const dailySales = Array.isArray(salesDataResult[0]) ? salesDataResult[0] : [];
+    const dailySales = Array.isArray(salesDataResult[0])
+      ? salesDataResult[0]
+      : [];
     const weeklySales = dailySales.slice(-7);
     const monthlySales = dailySales;
 
     // 5. تجميع البيانات النهائية
     const analytics = {
       // استخدام Optional Chaining (?.) والبدائل (||) لمنع الانهيار
-      userCounts: (userCountsResult && userCountsResult[0] && userCountsResult[0][0]) || { merchants: 0, models: 0, influencers: 0, customers: 0 },
-      generalCounts: (generalCountsResult && generalCountsResult[0] && generalCountsResult[0][0]) || { totalProducts: 0, totalOrders: 0, totalShipping: 0, totalAgreements: 0 },
+      userCounts: (userCountsResult &&
+        userCountsResult[0] &&
+        userCountsResult[0][0]) || {
+        merchants: 0,
+        models: 0,
+        influencers: 0,
+        customers: 0,
+      },
+      generalCounts: (generalCountsResult &&
+        generalCountsResult[0] &&
+        generalCountsResult[0][0]) || {
+        totalProducts: 0,
+        totalOrders: 0,
+        totalShipping: 0,
+        totalAgreements: 0,
+      },
       weeklySales,
       monthlySales,
       platformRevenue: totalRevenue,
@@ -97,15 +122,14 @@ exports.getDashboardAnalytics = async (req, res) => {
     };
 
     res.status(200).json(analytics);
-
   } catch (error) {
     // طباعة الخطأ بالتفصيل في الكونسول لمعرفة السبب الحقيقي
     console.error("🔥 Error fetching dashboard analytics:", error);
-    
+
     // إرجاع رسالة خطأ دون تفاصيل حساسة للمستخدم
-    res.status(500).json({ 
-        message: "Server error while fetching analytics.",
-        error: error.message // مفيد أثناء التطوير (يمكن إزالته في الإنتاج)
+    res.status(500).json({
+      message: "Server error while fetching analytics.",
+      error: error.message, // مفيد أثناء التطوير (يمكن إزالته في الإنتاج)
     });
   }
 };
@@ -141,7 +165,7 @@ exports.updateUser = async (req, res) => {
   try {
     await pool.query(
       "UPDATE users SET role_id = ?, is_banned = ? WHERE id = ?",
-      [role_id, is_banned, id]
+      [role_id, is_banned, id],
     );
     res.status(200).json({ message: "تم تحديث المستخدم بنجاح!" });
   } catch (error) {
@@ -164,13 +188,16 @@ exports.deleteUser = asyncHandler(async (req, res) => {
   }
 
   const connection = await pool.getConnection();
-  
+
   try {
     await connection.beginTransaction();
 
     // 1. التحقق من وجود المستخدم
-    const [[user]] = await connection.query("SELECT id FROM users WHERE id = ?", [userIdToDelete]);
-    
+    const [[user]] = await connection.query(
+      "SELECT id FROM users WHERE id = ?",
+      [userIdToDelete],
+    );
+
     if (!user) {
       await connection.rollback();
       connection.release();
@@ -181,53 +208,81 @@ exports.deleteUser = asyncHandler(async (req, res) => {
 
     // أ) حل مشكلة الخطأ السابق: حذف الاتفاقيات (سواء كان طرف أول أو ثاني)
     await connection.query(
-      "DELETE FROM agreements WHERE model_id = ? OR merchant_id = ?", 
-      [userIdToDelete, userIdToDelete]
+      "DELETE FROM agreements WHERE model_id = ? OR merchant_id = ?",
+      [userIdToDelete, userIdToDelete],
     );
 
-    await connection.query("DELETE FROM product_promotions WHERE merchant_id = ?", [userIdToDelete]);
+    await connection.query(
+      "DELETE FROM product_promotions WHERE merchant_id = ?",
+      [userIdToDelete],
+    );
 
-    await connection.query("DELETE FROM bank_details WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM bank_details WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
-    await connection.query("DELETE FROM flash_sale_products WHERE merchant_id = ?", [userIdToDelete]);
+    await connection.query(
+      "DELETE FROM flash_sale_products WHERE merchant_id = ?",
+      [userIdToDelete],
+    );
     // ب) حذف العناصر من سلة التسوق (لأنها مرتبطة بالمستخدم)
-    await connection.query("DELETE FROM stories WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM stories WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // ج) حذف قائمة المفضلة
-    await connection.query("DELETE FROM wishlist WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM wishlist WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // د) حذف التقييمات التي قام بها المستخدم
-    await connection.query("DELETE FROM product_reviews WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM product_reviews WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // هـ) حذف العناوين
-    await connection.query("DELETE FROM addresses WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM addresses WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // و) حذف الإشعارات
-    await connection.query("DELETE FROM notifications WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM notifications WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // ز) حذف الاشتراكات
-    await connection.query("DELETE FROM user_subscriptions WHERE user_id = ?", [userIdToDelete]);
+    await connection.query("DELETE FROM user_subscriptions WHERE user_id = ?", [
+      userIdToDelete,
+    ]);
 
     // ح) حذف معاملات المحفظة (تحذير: هذا يمحو السجل المالي)
-    await connection.query("DELETE FROM wallet_transactions WHERE user_id = ?", [userIdToDelete]);
+    await connection.query(
+      "DELETE FROM wallet_transactions WHERE user_id = ?",
+      [userIdToDelete],
+    );
 
     // --- التعامل مع المنتجات والطلبات (معقد جدًا) ---
     // إذا كان المستخدم تاجرًا ولديه منتجات، حذف المنتجات سيفشل إذا كان هناك "طلبات" (Orders) تحتوي على هذه المنتجات.
     // الحل الأفضل هنا هو فصل المستخدم عن المنتجات بدلاً من حذفها (Set NULL) أو استخدام الحذف الناعم.
     // ولكن لإكمال طلبك، سنحاول حذف المنتجات "إن لم تكن مرتبطة بطلبات":
     try {
-        await connection.query("DELETE FROM products WHERE merchant_id = ?", [userIdToDelete]);
+      await connection.query("DELETE FROM products WHERE merchant_id = ?", [
+        userIdToDelete,
+      ]);
     } catch (err) {
-        // نتجاهل الخطأ هنا ونكمل، لأننا لا نريد منع حذف المستخدم بسبب منتج قديم
-        console.warn("Could not delete merchant products due to existing orders.");
+      // نتجاهل الخطأ هنا ونكمل، لأننا لا نريد منع حذف المستخدم بسبب منتج قديم
+      console.warn(
+        "Could not delete merchant products due to existing orders.",
+      );
     }
 
     // 2. الخطوة النهائية: حذف المستخدم نفسه
     await connection.query("DELETE FROM users WHERE id = ?", [userIdToDelete]);
 
     await connection.commit();
-    res.status(200).json({ message: "تم حذف المستخدم وجميع بياناته المرتبطة بنجاح." });
-
+    res
+      .status(200)
+      .json({ message: "تم حذف المستخدم وجميع بياناته المرتبطة بنجاح." });
   } catch (error) {
     await connection.rollback();
     console.error("Error deleting user:", error);
@@ -235,7 +290,8 @@ exports.deleteUser = asyncHandler(async (req, res) => {
     // التعامل مع أخطاء القيود (Foreign Key Constraints) التي لم نغطيها
     if (error.code === "ER_ROW_IS_REFERENCED_2") {
       return res.status(400).json({
-        message: "لا يمكن حذف المستخدم لوجود سجلات حساسة مرتبطة به (مثل طلبات شراء سابقة). نوصي بتعطيل الحساب بدلاً من حذفه.",
+        message:
+          "لا يمكن حذف المستخدم لوجود سجلات حساسة مرتبطة به (مثل طلبات شراء سابقة). نوصي بتعطيل الحساب بدلاً من حذفه.",
         details: error.sqlMessage,
       });
     }
@@ -285,13 +341,13 @@ exports.getPlatformStats = async (req, res) => {
       pool.query("SELECT COUNT(*) as count FROM users"),
       pool.query("SELECT COUNT(*) as count FROM users WHERE role_id = 2"),
       pool.query(
-        "SELECT COUNT(*) as count FROM orders WHERE status = 'completed'"
+        "SELECT COUNT(*) as count FROM orders WHERE status = 'completed'",
       ),
       pool.query(
-        "SELECT SUM(oi.price * oi.quantity) as total FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed'"
+        "SELECT SUM(oi.price * oi.quantity) as total FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.status = 'completed'",
       ),
       pool.query(
-        "SELECT COUNT(*) as count FROM agreements WHERE status IN ('accepted', 'completed')"
+        "SELECT COUNT(*) as count FROM agreements WHERE status IN ('accepted', 'completed')",
       ),
     ];
 
@@ -324,7 +380,7 @@ exports.getPlatformStats = async (req, res) => {
 exports.getSettings = async (req, res) => {
   try {
     const [settings] = await pool.query(
-      "SELECT setting_key, setting_value FROM platform_settings"
+      "SELECT setting_key, setting_value FROM platform_settings",
     );
     // تحويل المصفوفة إلى كائن لسهولة الاستخدام في الواجهة الأمامية
     const settingsObj = settings.reduce((obj, item) => {
@@ -346,7 +402,7 @@ exports.updateSettings = async (req, res) => {
     for (const key in settings) {
       await connection.query(
         "UPDATE platform_settings SET setting_value = ? WHERE setting_key = ?",
-        [settings[key], key]
+        [settings[key], key],
       );
     }
     await connection.commit();
@@ -362,7 +418,7 @@ exports.updateSettings = async (req, res) => {
 exports.getShippingCompanies = async (req, res) => {
   try {
     const [companies] = await pool.query(
-      "SELECT * FROM shipping_companies ORDER BY name ASC"
+      "SELECT * FROM shipping_companies ORDER BY name ASC",
     );
     res.status(200).json(companies);
   } catch (error) {
@@ -376,7 +432,7 @@ exports.addShippingCompany = async (req, res) => {
   try {
     await pool.query(
       "INSERT INTO shipping_companies (name, api_key, is_active) VALUES (?, ?, ?)",
-      [name, api_key, is_active]
+      [name, api_key, is_active],
     );
     res.status(201).json({ message: "تمت إضافة شركة الشحن بنجاح." });
   } catch (error) {
@@ -391,7 +447,7 @@ exports.updateShippingCompany = async (req, res) => {
   try {
     await pool.query(
       "UPDATE shipping_companies SET name = ?, api_key = ?, is_active = ? WHERE id = ?",
-      [name, api_key, is_active, id]
+      [name, api_key, is_active, id],
     );
     res.status(200).json({ message: "تم تحديث شركة الشحن بنجاح." });
   } catch (error) {
@@ -503,7 +559,7 @@ exports.getOrderDetails = async (req, res) => {
              FROM orders o 
              JOIN users u ON o.customer_id = u.id 
              WHERE o.id = ?`,
-      [orderId]
+      [orderId],
     );
 
     if (orderDetails.length === 0) {
@@ -516,13 +572,13 @@ exports.getOrderDetails = async (req, res) => {
              JOIN products p ON oi.product_id = p.id
              LEFT JOIN product_variants v ON oi.product_variant_id = v.id
              WHERE oi.order_id = ?`,
-      [orderId]
+      [orderId],
     );
 
     // حساب الإجمالي
     const totalAmount = orderItems.reduce(
       (sum, item) => sum + item.price * item.quantity,
-      0
+      0,
     );
 
     res.status(200).json({
@@ -559,7 +615,7 @@ exports.updateAgreementStatus = async (req, res) => {
 
     const [result] = await connection.query(
       "UPDATE agreements SET status = ? WHERE id = ?",
-      [status, id]
+      [status, id],
     );
 
     if (result.affectedRows === 0) {
@@ -580,7 +636,7 @@ exports.updateAgreementStatus = async (req, res) => {
             JOIN offers o ON a.offer_id = o.id
             WHERE a.id = ?
             `,
-      [id]
+      [id],
     );
 
     // --- ✨ منطق العمولة والمحفظة يبدأ هنا ---
@@ -592,7 +648,7 @@ exports.updateAgreementStatus = async (req, res) => {
       // الآن هذا السطر سيعمل بنجاح لأن stripe_payment_intent_id موجود
       if (!stripe_payment_intent_id) {
         throw new Error(
-          "Stripe payment intent ID not found for this agreement."
+          "Stripe payment intent ID not found for this agreement.",
         );
       }
 
@@ -601,7 +657,7 @@ exports.updateAgreementStatus = async (req, res) => {
 
       // 2. حساب العمولة وصافي الربح (نفس المنطق السابق)
       const [settings] = await connection.query(
-        "SELECT setting_value FROM platform_settings WHERE setting_key = 'agreement_commission_rate'"
+        "SELECT setting_value FROM platform_settings WHERE setting_key = 'agreement_commission_rate'",
       );
       const commissionRate = parseFloat(settings[0]?.setting_value) || 0;
       const commissionAmount = (offer_price * commissionRate) / 100;
@@ -610,17 +666,17 @@ exports.updateAgreementStatus = async (req, res) => {
       // 3. إيداع صافي الربح في محفظة المودل (نفس المنطق السابق)
       const [[modelWallet]] = await connection.query(
         "SELECT id FROM model_wallets WHERE user_id = ?",
-        [model_id]
+        [model_id],
       );
       if (!modelWallet) {
         await connection.query(
           "INSERT INTO model_wallets (user_id) VALUES (?)",
-          [model_id]
+          [model_id],
         );
       }
       await connection.query(
         "UPDATE model_wallets SET pending_clearance = pending_clearance + ? WHERE user_id = ?",
-        [netEarnings, model_id]
+        [netEarnings, model_id],
       );
     }
 
@@ -647,7 +703,7 @@ exports.updateAgreementStatus = async (req, res) => {
           "AGREEMENT_UPDATE",
           notificationMessage,
           "/dashboard/requests",
-        ]
+        ],
       );
 
       // إرسال الإيميلات
@@ -681,7 +737,7 @@ exports.cancelUserSubscription = async (req, res) => {
   try {
     const [subResult] = await pool.query(
       "SELECT stripe_subscription_id FROM user_subscriptions WHERE id = ?",
-      [id]
+      [id],
     );
 
     if (subResult.length === 0 || !subResult[0].stripe_subscription_id) {
@@ -700,7 +756,7 @@ exports.cancelUserSubscription = async (req, res) => {
     // Update the status in your database
     await pool.query(
       "UPDATE user_subscriptions SET status = 'cancelled' WHERE id = ?",
-      [id]
+      [id],
     );
 
     res.status(200).json({
@@ -760,7 +816,7 @@ exports.updateSettings = async (req, res) => {
           `INSERT INTO platform_settings (setting_key, setting_value) 
                      VALUES (?, ?) 
                      ON DUPLICATE KEY UPDATE setting_value = ?`,
-          [key, value, value]
+          [key, value, value],
         );
       }
     }
@@ -779,7 +835,7 @@ exports.updateSettings = async (req, res) => {
 exports.getPendingVerifications = async (req, res) => {
   try {
     const [users] = await pool.query(
-      "SELECT id, name, email, business_name, created_at FROM users WHERE verification_status = 'pending'"
+      "SELECT id, name, email, business_name, created_at FROM users WHERE verification_status = 'pending'",
     );
     res.json(users);
   } catch (error) {
@@ -792,7 +848,7 @@ exports.getPendingVerifications = async (req, res) => {
 exports.getVerificationDetails = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     // 1. جلب بيانات المستخدم الأساسية + بيانات التوثيق
     const [user] = await pool.query(
       `SELECT 
@@ -801,7 +857,7 @@ exports.getVerificationDetails = async (req, res) => {
          business_name, business_license_url, 
          social_links, stats, verification_status 
        FROM users WHERE id = ?`,
-      [id]
+      [id],
     );
 
     if (user.length === 0) {
@@ -820,24 +876,26 @@ exports.getVerificationDetails = async (req, res) => {
          is_verified
        FROM bank_details 
        WHERE user_id = ?`,
-      [id]
+      [id],
     );
 
     // 3. معالجة بيانات JSON (لضمان عدم حدوث خطأ إذا كانت الحقول فارغة أو نصية)
     const userProfile = user[0];
-    
+
     try {
-        userProfile.social_links = typeof userProfile.social_links === 'string' 
-            ? JSON.parse(userProfile.social_links) 
-            : (userProfile.social_links || {});
-            
-        userProfile.stats = typeof userProfile.stats === 'string' 
-            ? JSON.parse(userProfile.stats) 
-            : (userProfile.stats || {});
+      userProfile.social_links =
+        typeof userProfile.social_links === "string"
+          ? JSON.parse(userProfile.social_links)
+          : userProfile.social_links || {};
+
+      userProfile.stats =
+        typeof userProfile.stats === "string"
+          ? JSON.parse(userProfile.stats)
+          : userProfile.stats || {};
     } catch (e) {
-        // في حال حدوث خطأ في التحليل، نعيد كائنات فارغة
-        userProfile.social_links = {};
-        userProfile.stats = {};
+      // في حال حدوث خطأ في التحليل، نعيد كائنات فارغة
+      userProfile.social_links = {};
+      userProfile.stats = {};
     }
 
     res.json({ user: userProfile, bank: bank[0] || {} });
@@ -863,29 +921,42 @@ exports.reviewVerification = async (req, res) => {
   try {
     await pool.query(
       "UPDATE users SET verification_status = ?, rejection_reason = ? WHERE id = ?",
-      [status, status === "rejected" ? rejection_reason : null, id]
+      [status, status === "rejected" ? rejection_reason : null, id],
     );
 
     // --- Send Email Notification ---
-    const [user] = await pool.query("SELECT email, name FROM users WHERE id = ?", [id]);
-    
+    const [user] = await pool.query(
+      "SELECT email, name FROM users WHERE id = ?",
+      [id],
+    );
+
     if (user.length > 0) {
       const { email, name } = user[0];
-      
+
       // 1. إشعار داخل الموقع
-      const message = status === 'approved' 
-        ? "تهانينا! تمت الموافقة على توثيق حسابك." 
-        : "عذراً، تم رفض طلب التوثيق. يرجى مراجعة البريد الإلكتروني للتفاصيل.";
-        
+      const message =
+        status === "approved"
+          ? "تهانينا! تمت الموافقة على توثيق حسابك."
+          : "عذراً، تم رفض طلب التوثيق. يرجى مراجعة البريد الإلكتروني للتفاصيل.";
+
       await pool.query(
         "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
-        [id, "VERIFICATION", status === 'approved' ? 'check' : 'x', message, "/dashboard/settings"]
+        [
+          id,
+          "VERIFICATION",
+          status === "approved" ? "check" : "x",
+          message,
+          "/dashboard/settings",
+        ],
       );
 
       // 2. إرسال الإيميل بالقالب الجديد
       await sendEmail({
         to: email,
-        subject: status === "approved" ? "مبروك! تم توثيق حسابك في لينيورا" : "تحديث بخصوص طلب التوثيق",
+        subject:
+          status === "approved"
+            ? "مبروك! تم توثيق حسابك في لينيورا"
+            : "تحديث بخصوص طلب التوثيق",
         html: templates.verificationResult(name, status, rejection_reason),
       });
     }
@@ -896,221 +967,251 @@ exports.reviewVerification = async (req, res) => {
   }
 };
 
-/**
- * @desc    Admin: Get all pending payout requests (merchants AND suppliers)
- * @route   GET /api/admin/payouts
- * @access  Private (Admin)
- */
-exports.getAllPayoutRequests = asyncHandler(async (req, res) => {
-  try {
-    const [requests] = await pool.query(`
-            -- Fetch Merchant Payouts
-            SELECT 
-                pr.id, pr.amount, pr.status, pr.created_at,
-                u.id as user_id, u.name, u.email,
-                'merchant' as user_type 
-            FROM payout_requests pr
-            JOIN users u ON pr.merchant_id = u.id
-            WHERE pr.status = 'pending'
+// /**
+//  * @desc    Admin: Get all pending payout requests (merchants AND suppliers)
+//  * @route   GET /api/admin/payouts
+//  * @access  Private (Admin)
+//  */
+// exports.getAllPayoutRequests = asyncHandler(async (req, res) => {
+//   try {
+//     const [requests] = await pool.query(`
+//             -- Fetch Merchant Payouts
+//             SELECT
+//                 pr.id, pr.amount, pr.status, pr.created_at,
+//                 u.id as user_id, u.name, u.email,
+//                 'merchant' as user_type
+//             FROM payout_requests pr
+//             JOIN users u ON pr.merchant_id = u.id
+//             WHERE pr.status = 'pending'
 
-            UNION ALL
+//             UNION ALL
 
-            -- Fetch Supplier Payouts
-            SELECT 
-                spr.id, spr.amount, spr.status, spr.created_at,
-                u.id as user_id, u.name, u.email,
-                'supplier' as user_type
-            FROM supplier_payout_requests spr
-            JOIN users u ON spr.supplier_id = u.id
-            WHERE spr.status = 'pending'
+//             -- Fetch Supplier Payouts
+//             SELECT
+//                 spr.id, spr.amount, spr.status, spr.created_at,
+//                 u.id as user_id, u.name, u.email,
+//                 'supplier' as user_type
+//             FROM supplier_payout_requests spr
+//             JOIN users u ON spr.supplier_id = u.id
+//             WHERE spr.status = 'pending'
 
-            ORDER BY created_at ASC
-        `);
-    res.json(requests);
-  } catch (error) {
-    console.error("Error fetching all payout requests:", error);
-    res
-      .status(500)
-      .json({ message: "Server error while fetching payout requests." });
-  }
-});
+//             ORDER BY created_at ASC
+//         `);
+//     res.json(requests);
+//   } catch (error) {
+//     console.error("Error fetching all payout requests:", error);
+//     res
+//       .status(500)
+//       .json({ message: "Server error while fetching payout requests." });
+//   }
+// });
 
-/**
- * @desc    Admin: Update the status of any payout request (merchant or supplier)
- * @route   PUT /api/admin/payouts/:id
- * @access  Private (Admin)
- */
-exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { status, notes, user_type } = req.body; 
+// /**
+//  * @desc    Admin: Update the status of any payout request (merchant or supplier)
+//  * @route   PUT /api/admin/payouts/:id
+//  * @access  Private (Admin)
+//  */
+// exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
+//   const { id } = req.params;
+//   const { status, notes, user_type } = req.body;
 
-  console.log(`🚀 [Payout Debug] Starting update for Request ID: ${id}`);
-  console.log(`📥 [Payout Debug] Input Data:`, { status, notes, user_type });
+//   console.log(`🚀 [Payout Debug] Starting update for Request ID: ${id}`);
+//   console.log(`📥 [Payout Debug] Input Data:`, { status, notes, user_type });
 
-  if (!["approved", "rejected"].includes(status)) {
-    console.error("❌ [Payout Debug] Invalid status provided.");
-    return res.status(400).json({ message: "Invalid status." });
-  }
-  if (!["merchant", "supplier"].includes(user_type)) {
-    console.error("❌ [Payout Debug] Invalid user_type provided.");
-    return res.status(400).json({ message: "Invalid user type." });
-  }
+//   if (!["approved", "rejected"].includes(status)) {
+//     console.error("❌ [Payout Debug] Invalid status provided.");
+//     return res.status(400).json({ message: "Invalid status." });
+//   }
+//   if (!["merchant", "supplier"].includes(user_type)) {
+//     console.error("❌ [Payout Debug] Invalid user_type provided.");
+//     return res.status(400).json({ message: "Invalid user type." });
+//   }
 
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
+//   const connection = await pool.getConnection();
+//   try {
+//     await connection.beginTransaction();
 
-    const isMerchant = user_type === "merchant";
-    const requestTable = isMerchant ? "payout_requests" : "supplier_payout_requests";
-    const userIdColumn = isMerchant ? "merchant_id" : "supplier_id";
+//     const isMerchant = user_type === "merchant";
+//     const requestTable = isMerchant
+//       ? "payout_requests"
+//       : "supplier_payout_requests";
+//     const userIdColumn = isMerchant ? "merchant_id" : "supplier_id";
 
-    console.log(`🔎 [Payout Debug] Fetching request info from table: ${requestTable}...`);
+//     console.log(
+//       `🔎 [Payout Debug] Fetching request info from table: ${requestTable}...`,
+//     );
 
-    // 1. جلب تفاصيل الطلب مع تفاصيل المستخدم
-    const [[requestInfo]] = await connection.query(
-      `SELECT pr.*, u.name, u.email, u.id as user_id
-       FROM ${requestTable} pr
-       JOIN users u ON pr.${userIdColumn} = u.id
-       WHERE pr.id = ? AND pr.status = "pending" FOR UPDATE`,
-      [id]
-    );
+//     // 1. جلب تفاصيل الطلب مع تفاصيل المستخدم
+//     const [[requestInfo]] = await connection.query(
+//       `SELECT pr.*, u.name, u.email, u.id as user_id
+//        FROM ${requestTable} pr
+//        JOIN users u ON pr.${userIdColumn} = u.id
+//        WHERE pr.id = ? AND pr.status = "pending" FOR UPDATE`,
+//       [id],
+//     );
 
-    // طباعة البيانات المسترجعة للتأكد منها
-    console.log("📄 [Payout Debug] Request Info Fetched:", requestInfo);
+//     // طباعة البيانات المسترجعة للتأكد منها
+//     console.log("📄 [Payout Debug] Request Info Fetched:", requestInfo);
 
-    if (!requestInfo) {
-      console.warn("⚠️ [Payout Debug] Request not found or not pending.");
-      await connection.rollback();
-      return res.status(404).json({ message: "Request not found or already processed." });
-    }
+//     if (!requestInfo) {
+//       console.warn("⚠️ [Payout Debug] Request not found or not pending.");
+//       await connection.rollback();
+//       return res
+//         .status(404)
+//         .json({ message: "Request not found or already processed." });
+//     }
 
-    // 2. تحديث حالة الطلب في جدول الطلبات
-    console.log("🔄 [Payout Debug] Updating request status in DB...");
-    await connection.query(
-      `UPDATE ${requestTable} SET status = ?, notes = ? WHERE id = ?`,
-      [status, notes, id]
-    );
+//     // 2. تحديث حالة الطلب في جدول الطلبات
+//     console.log("🔄 [Payout Debug] Updating request status in DB...");
+//     await connection.query(
+//       `UPDATE ${requestTable} SET status = ?, notes = ? WHERE id = ?`,
+//       [status, notes, id],
+//     );
 
-    // 3. التعامل مع المحفظة بناءً على الحالة
-    if (status === "rejected") {
-        console.log("🛑 [Payout Debug] Status is REJECTED. Processing Refund...");
-        
-        // --- حالة الرفض: إعادة الأموال ---
-        await connection.query(
-            `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id) 
-             VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
-            [
-                requestInfo.user_id, 
-                requestInfo.amount, 
-                `استرداد طلب سحب مرفوض #${id}`,
-                id
-            ]
-        );
-        console.log("✅ [Payout Debug] Refund transaction created.");
+//     // 3. التعامل مع المحفظة بناءً على الحالة
+//     if (status === "rejected") {
+//       console.log("🛑 [Payout Debug] Status is REJECTED. Processing Refund...");
 
-    } else if (status === "approved") {
-        console.log("✅ [Payout Debug] Status is APPROVED. Finalizing Transaction...");
-        
-        // --- حالة الموافقة: تأكيد الخصم ---
-        if (requestInfo.wallet_transaction_id) {
-            console.log(`🔗 [Payout Debug] Updating Wallet Transaction ID: ${requestInfo.wallet_transaction_id}`);
-            
-            const [updateResult] = await connection.query(
-                "UPDATE wallet_transactions SET status = 'paid', description = CONCAT(description, ' (تمت الموافقة)') WHERE id = ?",
-                [requestInfo.wallet_transaction_id]
-            );
-            console.log("✅ [Payout Debug] Wallet transaction updated. Affected Rows:", updateResult.affectedRows);
-        } else {
-            console.warn("⚠️ [Payout Debug] Warning: No wallet_transaction_id found in requestInfo!");
-        }
-    }
+//       // --- حالة الرفض: إعادة الأموال ---
+//       await connection.query(
+//         `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id)
+//              VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
+//         [
+//           requestInfo.user_id,
+//           requestInfo.amount,
+//           `استرداد طلب سحب مرفوض #${id}`,
+//           id,
+//         ],
+//       );
+//       console.log("✅ [Payout Debug] Refund transaction created.");
+//     } else if (status === "approved") {
+//       console.log(
+//         "✅ [Payout Debug] Status is APPROVED. Finalizing Transaction...",
+//       );
 
-    await connection.commit();
-    console.log("🎉 [Payout Debug] Transaction Committed Successfully.");
+//       // --- حالة الموافقة: تأكيد الخصم ---
+//       if (requestInfo.wallet_transaction_id) {
+//         console.log(
+//           `🔗 [Payout Debug] Updating Wallet Transaction ID: ${requestInfo.wallet_transaction_id}`,
+//         );
 
-    // --- 4. الإشعارات ---
-    try {
-        const message = `تم ${status === 'approved' ? 'الموافقة على' : 'رفض'} طلب السحب رقم #${id}.`;
-        
-        await pool.query(
-            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
-            [requestInfo.user_id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/wallet"]
-        );
-        console.log("🔔 [Payout Debug] Notification saved.");
+//         const [updateResult] = await connection.query(
+//           "UPDATE wallet_transactions SET status = 'paid', description = CONCAT(description, ' (تمت الموافقة)') WHERE id = ?",
+//           [requestInfo.wallet_transaction_id],
+//         );
+//         console.log(
+//           "✅ [Payout Debug] Wallet transaction updated. Affected Rows:",
+//           updateResult.affectedRows,
+//         );
+//       } else {
+//         console.warn(
+//           "⚠️ [Payout Debug] Warning: No wallet_transaction_id found in requestInfo!",
+//         );
+//       }
+//     }
 
-        sendEmail({
-            to: requestInfo.email,
-            subject: `تحديث حالة طلب السحب #${id}`,
-            html: templates.payoutStatusUpdate(requestInfo.name, requestInfo.amount, status, notes)
-        }).then(() => console.log("📧 [Payout Debug] Email sent.")).catch(err => console.error("📧 [Payout Debug] Email failed:", err));
+//     await connection.commit();
+//     console.log("🎉 [Payout Debug] Transaction Committed Successfully.");
 
-    } catch (notifyError) {
-        console.error("⚠️ [Payout Debug] Notification/Email Error (Non-blocking):", notifyError);
-    }
+//     // --- 4. الإشعارات ---
+//     try {
+//       const message = `تم ${status === "approved" ? "الموافقة على" : "رفض"} طلب السحب رقم #${id}.`;
 
-    res.json({ message: `Request for ${user_type} has been ${status}.` });
+//       await pool.query(
+//         "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+//         [
+//           requestInfo.user_id,
+//           "PAYOUT_UPDATE",
+//           "wallet",
+//           message,
+//           "/dashboard/wallet",
+//         ],
+//       );
+//       console.log("🔔 [Payout Debug] Notification saved.");
 
-  } catch (error) {
-    await connection.rollback();
-    console.error(`🔥 [Payout Debug] CRITICAL ERROR updating ${user_type} payout status:`, error);
-    res.status(500).json({ message: "Server error" });
-  } finally {
-    connection.release();
-  }
-});
+//       sendEmail({
+//         to: requestInfo.email,
+//         subject: `تحديث حالة طلب السحب #${id}`,
+//         html: templates.payoutStatusUpdate(
+//           requestInfo.name,
+//           requestInfo.amount,
+//           status,
+//           notes,
+//         ),
+//       })
+//         .then(() => console.log("📧 [Payout Debug] Email sent."))
+//         .catch((err) => console.error("📧 [Payout Debug] Email failed:", err));
+//     } catch (notifyError) {
+//       console.error(
+//         "⚠️ [Payout Debug] Notification/Email Error (Non-blocking):",
+//         notifyError,
+//       );
+//     }
 
+//     res.json({ message: `Request for ${user_type} has been ${status}.` });
+//   } catch (error) {
+//     await connection.rollback();
+//     console.error(
+//       `🔥 [Payout Debug] CRITICAL ERROR updating ${user_type} payout status:`,
+//       error,
+//     );
+//     res.status(500).json({ message: "Server error" });
+//   } finally {
+//     connection.release();
+//   }
+// });
 
-/**
- * @desc    Admin: Get details for a single payout request (merchant or supplier)
- * @route   GET /api/admin/payouts/:id
- * @access  Private (Admin)
- */
-exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { user_type } = req.query; // Send user_type as a query parameter from frontend
+// /**
+//  * @desc    Admin: Get details for a single payout request (merchant or supplier)
+//  * @route   GET /api/admin/payouts/:id
+//  * @access  Private (Admin)
+//  */
+// exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
+//   const { id } = req.params;
+//   const { user_type } = req.query; // Send user_type as a query parameter from frontend
 
-  if (!["merchant", "supplier"].includes(user_type)) {
-    return res.status(400).json({ message: "Invalid user type provided." });
-  }
+//   if (!["merchant", "supplier"].includes(user_type)) {
+//     return res.status(400).json({ message: "Invalid user type provided." });
+//   }
 
-  const isMerchant = user_type === "merchant";
-  // ما زلنا نستخدم جداول الطلبات المنفصلة (حسب تصميمك)، ولكن نوحد جدول البنك
-  const requestTable = isMerchant
-    ? "payout_requests"
-    : "supplier_payout_requests";
-  const userIdColumn = isMerchant ? "pr.merchant_id" : "pr.supplier_id";
+//   const isMerchant = user_type === "merchant";
+//   // ما زلنا نستخدم جداول الطلبات المنفصلة (حسب تصميمك)، ولكن نوحد جدول البنك
+//   const requestTable = isMerchant
+//     ? "payout_requests"
+//     : "supplier_payout_requests";
+//   const userIdColumn = isMerchant ? "pr.merchant_id" : "pr.supplier_id";
 
-  try {
-    const [details] = await pool.query(
-      `SELECT 
-          pr.id, pr.amount, pr.status, pr.created_at,
-          u.name, u.email, u.phone_number,
-          
-          -- ✅ جلب البيانات البنكية من الجدول الموحد
-          bd.bank_name, 
-          bd.account_holder_name,
-          bd.account_number, 
-          bd.iban, 
-          bd.iban_certificate_url
+//   try {
+//     const [details] = await pool.query(
+//       `SELECT
+//           pr.id, pr.amount, pr.status, pr.created_at,
+//           u.name, u.email, u.phone_number,
 
-       FROM ${requestTable} pr
-       JOIN users u ON ${userIdColumn} = u.id
-       -- ✅ الربط مع جدول bank_details بدلاً من merchant_bank_details
-       LEFT JOIN bank_details bd ON u.id = bd.user_id 
-       WHERE pr.id = ?`,
-      [id]
-    );
+//           -- ✅ جلب البيانات البنكية من الجدول الموحد
+//           bd.bank_name,
+//           bd.account_holder_name,
+//           bd.account_number,
+//           bd.iban,
+//           bd.iban_certificate_url
 
-    if (details.length === 0) {
-      return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
-    }
+//        FROM ${requestTable} pr
+//        JOIN users u ON ${userIdColumn} = u.id
+//        -- ✅ الربط مع جدول bank_details بدلاً من merchant_bank_details
+//        LEFT JOIN bank_details bd ON u.id = bd.user_id
+//        WHERE pr.id = ?`,
+//       [id],
+//     );
 
-    res.json({ ...details[0], user_type });
-  } catch (error) {
-    console.error("Error fetching payout request details:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+//     if (details.length === 0) {
+//       return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
+//     }
+
+//     res.json({ ...details[0], user_type });
+//   } catch (error) {
+//     console.error("Error fetching payout request details:", error);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// });
 
 /**
  * @desc    Get all subscription plans
@@ -1120,7 +1221,7 @@ exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
 exports.getSubscriptionPlans = asyncHandler(async (req, res) => {
   try {
     const [plans] = await pool.query(
-      "SELECT * FROM subscription_plans ORDER BY role, price"
+      "SELECT * FROM subscription_plans ORDER BY role, price",
     );
     res.json(plans);
   } catch (error) {
@@ -1160,7 +1261,7 @@ exports.createSubscriptionPlan = asyncHandler(async (req, res) => {
     // 🔥 تحديث جملة SQL لإضافة العمود الجديد
     const [result] = await pool.query(
       "INSERT INTO subscription_plans (role, name, description, price, features, includes_dropshipping, allows_promotion_in_stories, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      valuesToInsert
+      valuesToInsert,
     );
 
     res
@@ -1204,7 +1305,7 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
     // 🔥 تحديث جملة SQL لتعديل العمود الجديد
     const [result] = await pool.query(
       "UPDATE subscription_plans SET name = ?, description = ?, price = ?, features = ?, includes_dropshipping = ?, allows_promotion_in_stories = ?, is_active = ? WHERE id = ?",
-      valuesToUpdate
+      valuesToUpdate,
     );
 
     if (result.affectedRows === 0) {
@@ -1218,176 +1319,187 @@ exports.updateSubscriptionPlan = asyncHandler(async (req, res) => {
   }
 });
 
-/**
- * @desc    Admin: Get all pending payout requests for models
- * @route   GET /api/admin/model-payouts
- * @access  Private (Admin)
- */
-exports.getAllModelPayouts = async (req, res) => {
-  try {
-    const [requests] = await pool.query(`
-        SELECT 
-          mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
-          u.id as user_id, 
-          u.name as userName,      
-          u.email as userEmail,
-          
-          -- ✅ إضافة بيانات البنك من الجدول الموحد bank_details
-          bd.bank_name,
-          bd.account_holder_name,
-          bd.account_number, 
-          bd.iban, 
-          bd.iban_certificate_url
+// /**
+//  * @desc    Admin: Get all pending payout requests for models
+//  * @route   GET /api/admin/model-payouts
+//  * @access  Private (Admin)
+//  */
+// exports.getAllModelPayouts = async (req, res) => {
+//   try {
+//     const [requests] = await pool.query(`
+//         SELECT
+//           mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
+//           u.id as user_id,
+//           u.name as userName,
+//           u.email as userEmail,
 
-      FROM model_payout_requests mpr
-      JOIN users u ON mpr.user_id = u.id
-      -- ✅ الربط مع bank_details بدلاً من merchant_bank_details
-      LEFT JOIN bank_details bd ON u.id = bd.user_id
-      ORDER BY mpr.created_at DESC
-    `);
+//           -- ✅ إضافة بيانات البنك من الجدول الموحد bank_details
+//           bd.bank_name,
+//           bd.account_holder_name,
+//           bd.account_number,
+//           bd.iban,
+//           bd.iban_certificate_url
 
-    res.json(requests);
-  } catch (error) {
-    console.error("Error fetching all model payout requests:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-};
+//       FROM model_payout_requests mpr
+//       JOIN users u ON mpr.user_id = u.id
+//       -- ✅ الربط مع bank_details بدلاً من merchant_bank_details
+//       LEFT JOIN bank_details bd ON u.id = bd.user_id
+//       ORDER BY mpr.created_at DESC
+//     `);
 
-/**
- * @desc    Admin: Update the status of a model payout request
- * @route   PUT /api/admin/model-payouts/:id
- * @access  Private (Admin)
- */
-exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { status, notes } = req.body; // 'approved' or 'rejected'
+//     res.json(requests);
+//   } catch (error) {
+//     console.error("Error fetching all model payout requests:", error);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// };
 
-  if (!["approved", "rejected"].includes(status)) {
-    return res.status(400).json({ message: "Status is required." });
-  }
+// /**
+//  * @desc    Admin: Update the status of a model payout request
+//  * @route   PUT /api/admin/model-payouts/:id
+//  * @access  Private (Admin)
+//  */
+// exports.updateModelPayoutStatus = asyncHandler(async (req, res) => {
+//   const { id } = req.params;
+//   const { status, notes } = req.body; // 'approved' or 'rejected'
 
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
+//   if (!["approved", "rejected"].includes(status)) {
+//     return res.status(400).json({ message: "Status is required." });
+//   }
 
-    const [payouts] = await connection.query(
-      "SELECT * FROM model_payout_requests WHERE id = ? FOR UPDATE",
-      [id]
-    );
-    const payout = payouts[0];
+//   const connection = await pool.getConnection();
+//   try {
+//     await connection.beginTransaction();
 
-    if (!payout) {
-      await connection.rollback();
-      return res.status(404).json({ message: "Payout request not found." });
-    }
+//     const [payouts] = await connection.query(
+//       "SELECT * FROM model_payout_requests WHERE id = ? FOR UPDATE",
+//       [id],
+//     );
+//     const payout = payouts[0];
 
-    if (payout.status !== "pending") {
-      await connection.rollback();
-      return res.status(400).json({ message: "Request already processed." });
-    }
+//     if (!payout) {
+//       await connection.rollback();
+//       return res.status(404).json({ message: "Payout request not found." });
+//     }
 
-    // 1. تحديث الطلب
-    await connection.query(
-      "UPDATE model_payout_requests SET status = ?, notes = ? WHERE id = ?",
-      [status, notes, id]
-    );
+//     if (payout.status !== "pending") {
+//       await connection.rollback();
+//       return res.status(400).json({ message: "Request already processed." });
+//     }
 
-    // 2. إذا تم الرفض، أعد المال إلى wallet_transactions
-    if (status === "rejected") {
-      const [txs] = await connection.query(
-        "SELECT * FROM wallet_transactions WHERE id = ?",
-        [payout.wallet_transaction_id] // هذا هو العمود الذي أضفناه
-      );
-      const originalTx = txs[0];
+//     // 1. تحديث الطلب
+//     await connection.query(
+//       "UPDATE model_payout_requests SET status = ?, notes = ? WHERE id = ?",
+//       [status, notes, id],
+//     );
 
-      if (originalTx) {
-        await connection.query(
-          `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id) 
-           VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
-          [
-            payout.user_id,
-            Math.abs(originalTx.amount), // إرجاع المبلغ الموجب
-            `إلغاء طلب السحب المرفوض #${id}`,
-            payout.id,
-          ]
-        );
-      }
-    }
+//     // 2. إذا تم الرفض، أعد المال إلى wallet_transactions
+//     if (status === "rejected") {
+//       const [txs] = await connection.query(
+//         "SELECT * FROM wallet_transactions WHERE id = ?",
+//         [payout.wallet_transaction_id], // هذا هو العمود الذي أضفناه
+//       );
+//       const originalTx = txs[0];
 
-    // 3. إذا تمت الموافقة، لا نفعل شيئاً
+//       if (originalTx) {
+//         await connection.query(
+//           `INSERT INTO wallet_transactions (user_id, amount, type, status, description, related_entity_id)
+//            VALUES (?, ?, 'payout_refund', 'cleared', ?, ?)`,
+//           [
+//             payout.user_id,
+//             Math.abs(originalTx.amount), // إرجاع المبلغ الموجب
+//             `إلغاء طلب السحب المرفوض #${id}`,
+//             payout.id,
+//           ],
+//         );
+//       }
+//     }
 
-    await connection.commit();
+//     // 3. إذا تمت الموافقة، لا نفعل شيئاً
 
-    // --- 🔔 الإشعارات ---
-    if (payout) {
-        const message = `تم ${status === 'approved' ? 'الموافقة على' : 'رفض'} طلب السحب رقم #${id}.`;
-        
-        await pool.query(
-            "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
-            [payout.user_id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/models/wallet"]
-        );
+//     await connection.commit();
 
-        sendEmail({
-            to: payout.email,
-            subject: `تحديث حالة طلب السحب #${id}`,
-            html: templates.payoutStatusUpdate(payout.name, payout.amount, status, notes)
-        }).catch(console.error);
-    }
-    
-    res.json({ message: `Payout ${status}.` });
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error updating model payout:", error);
-    res.status(500).json({ message: "Server error" });
-  } finally {
-    connection.release();
-  }
-});
+//     // --- 🔔 الإشعارات ---
+//     if (payout) {
+//       const message = `تم ${status === "approved" ? "الموافقة على" : "رفض"} طلب السحب رقم #${id}.`;
 
-/**
- * @desc    Admin: Get details for a single model payout request
- * @route   GET /api/admin/model-payouts/:id
- * @access  Private (Admin)
- */
-exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
-  const { id } = req.params;
+//       await pool.query(
+//         "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+//         [
+//           payout.user_id,
+//           "PAYOUT_UPDATE",
+//           "wallet",
+//           message,
+//           "/dashboard/models/wallet",
+//         ],
+//       );
 
-  try {
-    // ✨ [تحديث] استخدام bank_details بدلاً من merchant_bank_details
-    const [details] = await pool.query(
-      `SELECT 
-          mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
-          u.name as userName, u.email as userEmail, u.phone_number,
-          
-          -- ✅ بيانات البنك من الجدول الموحد
-          bd.bank_name, 
-          bd.account_holder_name,
-          bd.account_number, 
-          bd.iban, 
-          bd.iban_certificate_url 
+//       sendEmail({
+//         to: payout.email,
+//         subject: `تحديث حالة طلب السحب #${id}`,
+//         html: templates.payoutStatusUpdate(
+//           payout.name,
+//           payout.amount,
+//           status,
+//           notes,
+//         ),
+//       }).catch(console.error);
+//     }
 
-       FROM model_payout_requests mpr
-       JOIN users u ON mpr.user_id = u.id
-       LEFT JOIN bank_details bd ON u.id = bd.user_id
-       WHERE mpr.id = ?`,
-      [id]
-    );
+//     res.json({ message: `Payout ${status}.` });
+//   } catch (error) {
+//     await connection.rollback();
+//     console.error("Error updating model payout:", error);
+//     res.status(500).json({ message: "Server error" });
+//   } finally {
+//     connection.release();
+//   }
+// });
 
-    if (details.length === 0) {
-      return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
-    }
+// /**
+//  * @desc    Admin: Get details for a single model payout request
+//  * @route   GET /api/admin/model-payouts/:id
+//  * @access  Private (Admin)
+//  */
+// exports.getModelPayoutDetails = asyncHandler(async (req, res) => {
+//   const { id } = req.params;
 
-    res.json(details[0]);
-  } catch (error) {
-    console.error("Error fetching model payout request details:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+//   try {
+//     // ✨ [تحديث] استخدام bank_details بدلاً من merchant_bank_details
+//     const [details] = await pool.query(
+//       `SELECT
+//           mpr.id, mpr.amount, mpr.status, mpr.notes, mpr.created_at,
+//           u.name as userName, u.email as userEmail, u.phone_number,
+
+//           -- ✅ بيانات البنك من الجدول الموحد
+//           bd.bank_name,
+//           bd.account_holder_name,
+//           bd.account_number,
+//           bd.iban,
+//           bd.iban_certificate_url
+
+//        FROM model_payout_requests mpr
+//        JOIN users u ON mpr.user_id = u.id
+//        LEFT JOIN bank_details bd ON u.id = bd.user_id
+//        WHERE mpr.id = ?`,
+//       [id],
+//     );
+
+//     if (details.length === 0) {
+//       return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
+//     }
+
+//     res.json(details[0]);
+//   } catch (error) {
+//     console.error("Error fetching model payout request details:", error);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// });
 
 // [GET] جلب جميع باقات الترويج
 exports.getAllPromotionTiers = asyncHandler(async (req, res) => {
   const [tiers] = await pool.query(
-    "SELECT id, name, duration_days, price, is_active FROM promotion_tiers ORDER BY created_at DESC"
+    "SELECT id, name, duration_days, price, is_active FROM promotion_tiers ORDER BY created_at DESC",
   );
   const formattedTiers = tiers.map((t) => ({ ...t, is_active: !!t.is_active })); // تحويل 0/1 إلى boolean
   res.status(200).json(formattedTiers);
@@ -1399,19 +1511,17 @@ exports.createPromotionTier = asyncHandler(async (req, res) => {
   const { name, duration_days, price, priority, badge_color } = req.body;
   const [result] = await pool.query(
     "INSERT INTO promotion_tiers (name, duration_days, price, priority, badge_color) VALUES (?, ?, ?, ?, ?)",
-    [name, duration_days, price, priority || 0, badge_color || "#cccccc"]
+    [name, duration_days, price, priority || 0, badge_color || "#cccccc"],
   );
-  res
-    .status(201)
-    .json({
-      id: result.insertId,
-      name,
-      duration_days,
-      price,
-      priority,
-      badge_color,
-      is_active: true,
-    });
+  res.status(201).json({
+    id: result.insertId,
+    name,
+    duration_days,
+    price,
+    priority,
+    badge_color,
+    is_active: true,
+  });
 });
 
 // [PUT] تحديث باقة ترويج
@@ -1456,7 +1566,7 @@ exports.updatePromotionTier = asyncHandler(async (req, res) => {
   values.push(id);
   await pool.query(
     `UPDATE promotion_tiers SET ${fields.join(", ")} WHERE id = ?`,
-    values
+    values,
   );
   res.status(200).json({ message: "تم تحديث الباقة بنجاح." });
 });
@@ -1490,7 +1600,7 @@ exports.approvePromotionRequest = asyncHandler(async (req, res) => {
       `SELECT pp.*, pt.duration_days FROM product_promotions pp 
              JOIN promotion_tiers pt ON pp.promotion_tier_id = pt.id 
              WHERE pp.id = ? AND pp.status = 'pending_approval'`,
-      [promotionId]
+      [promotionId],
     );
 
     if (!request) {
@@ -1499,7 +1609,7 @@ exports.approvePromotionRequest = asyncHandler(async (req, res) => {
 
     await connection.query(
       "UPDATE product_promotions SET status = 'active', start_date = NOW(), end_date = NOW() + INTERVAL ? DAY WHERE id = ?",
-      [request.duration_days, promotionId]
+      [request.duration_days, promotionId],
     );
 
     await connection.commit();
@@ -1570,7 +1680,7 @@ exports.updateProductStatusByAdmin = asyncHandler(async (req, res) => {
 
   const [result] = await pool.query(
     "UPDATE products SET status = ? WHERE id = ?",
-    [status, id]
+    [status, id],
   );
 
   if (result.affectedRows === 0) {
@@ -1596,20 +1706,20 @@ exports.deleteProductByAdmin = asyncHandler(async (req, res) => {
     // حذف السجلات المرتبطة (احترازي)
     await connection.query(
       "DELETE FROM product_categories WHERE product_id = ?",
-      [id]
+      [id],
     );
     await connection.query("DELETE FROM product_reviews WHERE product_id = ?", [
       id,
     ]);
     await connection.query(
       "DELETE FROM product_promotions WHERE product_id = ?",
-      [id]
+      [id],
     );
 
     // حذف المنتج نفسه (سيؤدي إلى حذف المتغيرات المرتبطة تلقائياً بسبب ON DELETE CASCADE)
     const [result] = await connection.query(
       "DELETE FROM products WHERE id = ?",
-      [id]
+      [id],
     );
 
     if (result.affectedRows === 0) {
@@ -1684,7 +1794,9 @@ exports.createSubAdmin = asyncHandler(async (req, res) => {
   const { name, email, password, permissions } = req.body;
 
   // التحقق من وجود المستخدم
-  const userExists = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
+  const userExists = await pool.query("SELECT id FROM users WHERE email = ?", [
+    email,
+  ]);
   if (userExists[0].length > 0) {
     res.status(400);
     throw new Error("المستخدم موجود بالفعل");
@@ -1696,14 +1808,16 @@ exports.createSubAdmin = asyncHandler(async (req, res) => {
 
   // البحث عن معرف دور الـ Admin (لنفترض أنه رقم 1 أو قم بجلبه)
   // يفضل جلب role_id الخاص بـ 'admin' من جدول roles
-  const [roleResult] = await pool.query("SELECT id FROM roles WHERE name = 'Admin' OR name = 'admin' LIMIT 1");
-  const adminRoleId = roleResult[0]?.id || 1; 
+  const [roleResult] = await pool.query(
+    "SELECT id FROM roles WHERE name = 'Admin' OR name = 'admin' LIMIT 1",
+  );
+  const adminRoleId = roleResult[0]?.id || 1;
 
   // إنشاء المستخدم مع الصلاحيات
   await pool.query(
     `INSERT INTO users (name, email, password, role_id, is_super_admin, permissions, verification_status, is_email_verified	) 
      VALUES (?, ?, ?, ?, FALSE, ?, 'approved', '1')`,
-    [name, email, hashedPassword, adminRoleId, JSON.stringify(permissions)]
+    [name, email, hashedPassword, adminRoleId, JSON.stringify(permissions)],
   );
 
   res.status(201).json({ message: "تم إنشاء الأدمن الفرعي بنجاح" });
@@ -1713,13 +1827,16 @@ exports.createSubAdmin = asyncHandler(async (req, res) => {
 // @route   GET /api/admin/sub-admins
 exports.getSubAdmins = asyncHandler(async (req, res) => {
   const [admins] = await pool.query(
-    "SELECT id, name, email, permissions FROM users WHERE role_id = '1' AND is_super_admin = FALSE"
+    "SELECT id, name, email, permissions FROM users WHERE role_id = '1' AND is_super_admin = FALSE",
   );
-  
+
   // تحويل permissions من نص إلى JSON إذا لزم الأمر (بعض مكتبات MySQL تفعلها تلقائياً)
-  const formattedAdmins = admins.map(admin => ({
+  const formattedAdmins = admins.map((admin) => ({
     ...admin,
-    permissions: typeof admin.permissions === 'string' ? JSON.parse(admin.permissions) : admin.permissions
+    permissions:
+      typeof admin.permissions === "string"
+        ? JSON.parse(admin.permissions)
+        : admin.permissions,
   }));
 
   res.json(formattedAdmins);
@@ -1733,7 +1850,7 @@ exports.updateSubAdmin = asyncHandler(async (req, res) => {
 
   await pool.query(
     "UPDATE users SET permissions = ? WHERE id = ? AND is_super_admin = FALSE",
-    [JSON.stringify(permissions), id]
+    [JSON.stringify(permissions), id],
   );
 
   res.json({ message: "تم تحديث الصلاحيات بنجاح" });
@@ -1749,7 +1866,14 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
 
   // قائمة الحالات المسموح بها (تأكد أنها تطابق قاعدة بياناتك)
-  const validStatuses = ['pending', 'processing', 'shipped', 'delivered', 'completed', 'cancelled'];
+  const validStatuses = [
+    "pending",
+    "processing",
+    "shipped",
+    "delivered",
+    "completed",
+    "cancelled",
+  ];
 
   if (!validStatuses.includes(status)) {
     return res.status(400).json({ message: "حالة الطلب غير صالحة." });
@@ -1758,7 +1882,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   try {
     const [result] = await pool.query(
       "UPDATE orders SET status = ? WHERE id = ?",
-      [status, id]
+      [status, id],
     );
 
     if (result.affectedRows === 0) {
@@ -1771,5 +1895,646 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   } catch (error) {
     console.error("Error updating order status:", error);
     res.status(500).json({ message: "فشل تحديث حالة الطلب." });
+  }
+});
+
+// backend/controllers/adminController.js
+
+/**
+ * @desc    جلب جميع طلبات السحب المعلقة
+ * @route   GET /api/admin/payouts
+ */
+exports.getAllPayoutRequests = asyncHandler(async (req, res) => {
+  // نجلب المعاملات التي نوعها payout
+  const [requests] = await pool.query(`
+    SELECT 
+      wt.id, wt.amount, wt.status, wt.created_at, wt.description,
+      u.name as userName, u.email as userEmail, u.role_id,
+      -- بيانات البنك (نفترض أنها مخزنة في json أو جدول منفصل، هنا نجلبها من تفاصيل المستخدم كمثال)
+      u.bank_name, u.iban, u.account_number
+    FROM wallet_transactions wt
+    JOIN wallets w ON wt.wallet_id = w.id
+    JOIN users u ON w.user_id = u.id
+    WHERE wt.type = 'payout'
+    ORDER BY wt.created_at DESC
+  `);
+
+  res.json(requests);
+});
+
+/**
+ * @desc    جلب تفاصيل طلب سحب محدد
+ * @route   GET /api/admin/payouts/:id
+ */
+exports.getPayoutRequestById = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const [request] = await pool.query(
+    `
+    SELECT 
+      wt.id, wt.amount, wt.status, wt.created_at, wt.description,
+      u.name as userName, u.email as userEmail,
+      u.bank_name, u.iban, u.account_number
+    FROM wallet_transactions wt
+    JOIN wallets w ON wt.wallet_id = w.id
+    JOIN users u ON w.user_id = u.id
+    WHERE wt.type = 'payout' AND wt.id = ?
+  `,
+    [id],
+  );
+
+  if (request.length === 0) {
+    return res.status(404).json({ message: "الطلب غير موجود" });
+  }
+
+  res.json(request[0]);
+});
+
+/**
+ * @desc    معالجة طلب السحب (قبول أو رفض)
+ * @route   PUT /api/admin/payouts/:id
+ */
+exports.processPayoutRequest = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status, notes } = req.body; // نتوقع 'approved' (cleared) أو 'rejected' (cancelled)
+
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(400).json({ message: "حالة غير صالحة" });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. التحقق من وجود الطلب
+    const [[transaction]] = await connection.query(
+      "SELECT * FROM wallet_transactions WHERE id = ? AND type = 'payout' FOR UPDATE",
+      [id],
+    );
+
+    if (!transaction) {
+      throw new Error("الطلب غير موجود");
+    }
+
+    if (transaction.status !== "pending") {
+      throw new Error("تمت معالجة هذا الطلب مسبقاً");
+    }
+
+    // 2. تحديث الحالة
+    let newStatus = "";
+    let descriptionUpdate = transaction.description;
+
+    if (status === "approved") {
+      newStatus = "cleared"; // تم التحويل بنجاح، يخصم من الرصيد نهائياً
+      // ملاحظة: الرصيد تم حجزه بالفعل عند إنشاء الطلب، لذا لا نغير الرصيد هنا، فقط الحالة
+
+      // (اختياري) تحديث عمود withdrawn_amount في المحفظة
+      await connection.query(
+        "UPDATE wallets SET withdrawn_amount = withdrawn_amount + ? WHERE id = ?",
+        [Math.abs(transaction.amount), transaction.wallet_id],
+      );
+    } else {
+      newStatus = "cancelled"; // تم الرفض، يجب إعادة المبلغ للمحفظة
+
+      // إعادة المبلغ للمحفظة (إلغاء الخصم)
+      await connection.query(
+        "UPDATE wallets SET balance = balance + ? WHERE id = ?",
+        [Math.abs(transaction.amount), transaction.wallet_id],
+      );
+
+      descriptionUpdate += ` (مرفوض: ${notes || "لا يوجد سبب"})`;
+    }
+
+    // 3. تحديث المعاملة
+    await connection.query(
+      "UPDATE wallet_transactions SET status = ?, description = ? WHERE id = ?",
+      [newStatus, descriptionUpdate, id],
+    );
+
+    // 4. إرسال إشعار للمستخدم (اختياري)
+    // ... كود الإشعار ...
+
+    await connection.commit();
+    res.json({
+      message: `تم ${status === "approved" ? "قبول" : "رفض"} الطلب بنجاح`,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error(error);
+    res
+      .status(500)
+      .json({ message: error.message || "حدث خطأ أثناء المعالجة" });
+  } finally {
+    connection.release();
+  }
+});
+// backend/controllers/adminController.js
+
+/**
+ * @desc    جلب التقارير المالية الشاملة للإدارة (Advanced Financial Reporting)
+ * @route   GET /api/admin/financial-reports
+ * @access  Private/Admin
+ */
+exports.getFinancialReports = asyncHandler(async (req, res) => {
+  const { range } = req.query;
+
+  // 1. إعداد فلاتر الوقت (تعديل هام جداً لتجنب الغموض)
+  // سنقوم بتعريف "الفترة الزمنية" فقط، ثم نطبقها مع اسم الجدول المناسب لاحقاً
+  let timeQuery = ">= DATE_SUB(NOW(), INTERVAL 30 DAY)";
+  let groupBy = "DATE(wt.created_at)";
+  let dateFormat = "%Y-%m-%d";
+
+  if (range === "today") {
+    timeQuery = ">= CURDATE()";
+    groupBy = "HOUR(wt.created_at)";
+    dateFormat = "%H:00";
+  } else if (range === "week") {
+    timeQuery = ">= DATE_SUB(NOW(), INTERVAL 7 DAY)";
+    groupBy = "DATE(wt.created_at)";
+  } else if (range === "year") {
+    timeQuery = ">= DATE_SUB(NOW(), INTERVAL 1 YEAR)";
+    groupBy = "MONTH(wt.created_at)";
+    dateFormat = "%Y-%m";
+  }
+
+  // 🔥 التصحيح هنا: نحدد شرطين مختلفين لتجنب تداخل الأسماء
+  // 1. للجداول التي نستخدم فيها الاسم المستعار wt (wallet_transactions)
+  const wtDateCondition = `wt.created_at ${timeQuery}`;
+
+  // 2. لجدول الطلبات (orders) حيث لا يوجد اسم مستعار
+  const orderDateCondition = `created_at ${timeQuery}`;
+
+  // =========================================================
+  // 2. تجميع الإحصائيات (Aggregation Query)
+  // =========================================================
+
+  // أ) إجمالي المبيعات (GMV) - نستخدم orderDateCondition
+  const [gmvResult] = await pool.query(`
+    SELECT COALESCE(SUM(total_amount), 0) as total 
+    FROM orders 
+    WHERE status IN ('completed', 'processing', 'shipped') AND ${orderDateCondition}
+  `);
+
+  // ب) تفصيل الإيرادات - نستخدم wtDateCondition
+  const [revenueStats] = await pool.query(`
+    SELECT 
+      COALESCE(ABS(SUM(CASE WHEN type IN ('cod_commission_deduction', 'commission_deduction', 'agreement_fee', 'subscription_payment', 'promotion_fee') THEN amount ELSE 0 END)), 0) as total_revenue,
+      COALESCE(ABS(SUM(CASE WHEN type = 'subscription_payment' THEN amount ELSE 0 END)), 0) as subscriptions_income,
+      COALESCE(ABS(SUM(CASE WHEN type = 'promotion_fee' THEN amount ELSE 0 END)), 0) as promotions_income,
+      COALESCE(ABS(SUM(CASE WHEN type IN ('cod_commission_deduction', 'commission_deduction', 'agreement_fee') THEN amount ELSE 0 END)), 0) as sales_commission,
+      COALESCE(ABS(SUM(CASE WHEN status = 'on_hold' THEN amount ELSE 0 END)), 0) as held_funds
+    FROM wallet_transactions wt
+    WHERE ${wtDateCondition}
+  `);
+
+  // ج) إحصائيات المحافظ (Snapshot - لا تعتمد على التاريخ)
+  const [walletStats] = await pool.query(`
+    SELECT 
+      COALESCE(SUM(CASE WHEN balance > 0 THEN balance ELSE 0 END), 0) as total_payable,
+      COALESCE(SUM(outstanding_debt) + ABS(SUM(CASE WHEN balance < 0 THEN balance ELSE 0 END)), 0) as total_debt,
+      COALESCE(SUM(pending_balance), 0) as total_pending
+    FROM wallets
+  `);
+
+  // =========================================================
+  // 3. بيانات الرسم البياني (Chart Data)
+  // =========================================================
+  // نستخدم wtDateCondition
+  const [chartData] = await pool.query(
+    `
+    SELECT 
+      DATE_FORMAT(wt.created_at, ?) as date,
+      COALESCE(ABS(SUM(CASE WHEN type IN ('cod_commission_deduction', 'commission_deduction', 'agreement_fee', 'subscription_payment', 'promotion_fee') THEN amount ELSE 0 END)), 0) as revenue,
+      COALESCE(ABS(SUM(CASE WHEN type = 'payout' THEN amount ELSE 0 END)), 0) as payouts
+    FROM wallet_transactions wt
+    WHERE ${wtDateCondition}
+    GROUP BY ${groupBy}
+    ORDER BY date ASC
+  `,
+    [dateFormat],
+  );
+
+  // =========================================================
+  // 4. سجل المعاملات التفصيلي (Transactions Log)
+  // =========================================================
+  // 🔥 هنا كان سبب الخطأ الرئيسي سابقاً، الآن نستخدم wtDateCondition
+  const [transactions] = await pool.query(`
+    SELECT wt.id, wt.type, wt.amount, wt.status, wt.created_at as date, wt.description, wt.reference_id,
+           u.name as user_name, u.email as user_email, u.id as userId,
+           CASE 
+             WHEN u.role_id = 2 THEN 'merchant'
+             WHEN u.role_id = 3 THEN 'supplier'
+             WHEN u.role_id = 4 THEN 'model'
+             ELSE 'user'
+           END as userType
+    FROM wallet_transactions wt
+    LEFT JOIN wallets w ON wt.wallet_id = w.id
+    LEFT JOIN users u ON w.user_id = u.id
+    WHERE ${wtDateCondition}
+    ORDER BY wt.created_at DESC
+    LIMIT 200
+  `);
+
+  // =========================================================
+  // 5. التنسيق النهائي للإجابة
+  // =========================================================
+  res.json({
+    stats: {
+      gmv: Number(gmvResult[0].total),
+      revenue: Number(revenueStats[0].total_revenue),
+      subscriptions_income: Number(revenueStats[0].subscriptions_income),
+      promotions_income: Number(revenueStats[0].promotions_income),
+      sales_commission: Number(revenueStats[0].sales_commission),
+      held_funds: Number(revenueStats[0].held_funds),
+
+      total_payable: Number(walletStats[0].total_payable),
+      total_debt: Number(walletStats[0].total_debt),
+      total_pending: Number(walletStats[0].total_pending),
+    },
+    chart: chartData.map((d) => ({
+      name: d.date,
+      revenue: Number(d.revenue),
+      payouts: Number(d.payouts),
+    })),
+    transactions: transactions.map((t) => ({
+      id: t.id,
+      type: t.type,
+      amount: Number(t.amount),
+      status: t.status,
+      user: t.user_name,
+      email: t.user_email,
+      userId: t.userId,
+      userType: t.userType,
+      date: t.date,
+      description: t.description,
+      reference_id: t.reference_id,
+    })),
+  });
+});
+
+/**
+ * @desc    جلب كشف حساب تفصيلي لمستخدم (لنافذة التفاصيل الجانبية)
+ * @route   GET /api/admin/financial-statement/:userId
+ */
+exports.getUserFinancialStatement = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+
+  const [walletStats] = await pool.query(
+    `
+    SELECT 
+      u.id, u.name, u.email, u.role_id, u.store_name,
+      SUM(w.balance) as balance,
+      SUM(w.pending_balance) as pending_balance,
+      SUM(w.outstanding_debt) as outstanding_debt,
+      SUM(w.total_earnings) as total_earnings,
+      SUM(w.withdrawn_amount) as withdrawn_amount
+    FROM users u
+    LEFT JOIN wallets w ON u.id = w.user_id
+    WHERE u.id = ?
+    GROUP BY u.id
+  `,
+    [userId],
+  );
+
+  if (!walletStats[0])
+    return res.status(404).json({ message: "المستخدم غير موجود" });
+
+  const [trxRows] = await pool.query(
+    `
+    SELECT wt.id, wt.type, wt.amount, wt.status, wt.description, wt.created_at as date, wt.reference_id
+    FROM wallet_transactions wt
+    JOIN wallets w ON wt.wallet_id = w.id
+    WHERE w.user_id = ?
+    ORDER BY wt.created_at DESC
+    LIMIT 100
+  `,
+    [userId],
+  );
+
+  res.json({
+    user: {
+      ...walletStats[0],
+      role:
+        walletStats[0].role_id === 2
+          ? "merchant"
+          : walletStats[0].role_id === 3
+            ? "supplier"
+            : "model",
+      wallet: {
+        balance: Number(walletStats[0].balance),
+        pending_balance: Number(walletStats[0].pending_balance),
+        outstanding_debt: Number(walletStats[0].outstanding_debt),
+        total_earnings: Number(walletStats[0].total_earnings),
+        total_withdrawn: Number(walletStats[0].withdrawn_amount),
+      },
+    },
+    transactions: trxRows.map((t) => ({ ...t, amount: Number(t.amount) })),
+  });
+});
+
+/**
+ * @desc    إدارة حالة المعاملة (تدخل إداري: تعليق، فك تعليق، استرداد)
+ * @route   PUT /api/admin/transactions/:id/action
+ * @access  Private/Admin
+ */
+exports.manageTransaction = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { action } = req.body;
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [[trx]] = await connection.query(
+      "SELECT * FROM wallet_transactions WHERE id = ? FOR UPDATE",
+      [id],
+    );
+
+    if (!trx) throw new Error("المعاملة غير موجودة");
+
+    let newStatus = trx.status;
+    let descriptionAppend = "";
+
+    if (action === "hold") {
+      if (trx.status === "cleared" && trx.amount > 0) {
+        await connection.query(
+          "UPDATE wallets SET balance = balance - ?, pending_balance = pending_balance + ? WHERE id = ?",
+          [trx.amount, trx.amount, trx.wallet_id],
+        );
+      }
+      newStatus = "on_hold";
+      descriptionAppend = " [تم التعليق إدارياً]";
+    } else if (action === "release") {
+      if (trx.status === "on_hold" && trx.amount > 0) {
+        await connection.query(
+          "UPDATE wallets SET balance = balance + ?, pending_balance = pending_balance - ? WHERE id = ?",
+          [trx.amount, trx.amount, trx.wallet_id],
+        );
+        newStatus = "cleared";
+      } else if (trx.status !== "on_hold") {
+        throw new Error("المعاملة ليست معلقة ليتم فكها");
+      }
+    } else if (action === "refund") {
+      const refundAmount = -1 * trx.amount;
+
+      await connection.query(
+        `INSERT INTO wallet_transactions 
+         (wallet_id, amount, type, status, payment_method, reference_type, reference_id, description, created_at)
+         VALUES (?, ?, 'refund', 'cleared', 'system', ?, ?, ?, NOW())`,
+        [
+          trx.wallet_id,
+          refundAmount,
+          trx.reference_type,
+          trx.reference_id,
+          `استرداد إداري للمعاملة #${id}`,
+        ],
+      );
+
+      await connection.query(
+        "UPDATE wallets SET balance = balance + ? WHERE id = ?",
+        [refundAmount, trx.wallet_id],
+      );
+
+      newStatus = "cancelled";
+    } else {
+      throw new Error("إجراء غير معروف");
+    }
+
+    await connection.query(
+      "UPDATE wallet_transactions SET status = ?, description = CONCAT(description, ?) WHERE id = ?",
+      [newStatus, descriptionAppend, id],
+    );
+
+    await connection.commit();
+    res.json({ message: "تم تنفيذ الإجراء بنجاح", newStatus });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Manage Transaction Error:", error);
+    res.status(500).json({ message: error.message || "فشل تنفيذ العملية" });
+  } finally {
+    connection.release();
+  }
+});
+
+/**
+ * @desc    Admin: Get ALL payout requests (Pending, Cleared, Cancelled)
+ * @route   GET /api/admin/payouts
+ * @access  Private (Admin)
+ */
+exports.getAllPayoutRequests = asyncHandler(async (req, res) => {
+  try {
+    const [requests] = await pool.query(`
+      SELECT 
+        wt.id, 
+        wt.amount, 
+        wt.status, 
+        wt.created_at,
+        wt.description,
+        
+        u.id as user_id, 
+        u.name, 
+        u.email,
+        u.role_id,
+        CASE 
+           WHEN u.role_id = 2 THEN 'merchant'
+           WHEN u.role_id = 3 THEN 'supplier'
+           WHEN u.role_id = 4 THEN 'model'
+           ELSE 'user'
+        END as user_type,
+
+        bd.bank_name,
+        bd.account_number,
+        bd.iban
+
+      FROM wallet_transactions wt
+      JOIN wallets w ON wt.wallet_id = w.id
+      JOIN users u ON w.user_id = u.id
+      LEFT JOIN bank_details bd ON u.id = bd.user_id
+      
+      -- 🔥 التعديل هنا: حذفنا شرط (AND wt.status IN ...)
+      WHERE wt.type = 'payout' 
+      
+      -- يفضل ترتيب النتائج من الأحدث للأقدم
+      ORDER BY wt.created_at DESC
+    `);
+
+    // تنسيق المبلغ (لأنه مخزن بالسالب)
+    const formattedRequests = requests.map((req) => ({
+      ...req,
+      amount: Math.abs(Number(req.amount)),
+    }));
+
+    res.json(formattedRequests);
+  } catch (error) {
+    console.error("Error fetching payout requests:", error);
+    res
+      .status(500)
+      .json({ message: "Server error while fetching payout requests." });
+  }
+});
+
+/**
+ * @desc    Admin: Get details for a single payout request
+ * @route   GET /api/admin/payouts/:id
+ * @access  Private (Admin)
+ */
+exports.getPayoutRequestDetails = asyncHandler(async (req, res) => {
+  const { id } = req.params; // Transaction ID
+
+  try {
+    const [details] = await pool.query(
+      `
+      SELECT 
+        wt.id, 
+        wt.amount, 
+        wt.status, 
+        wt.created_at,
+        wt.description,
+        
+        u.id as user_id,
+        u.name, 
+        u.email, 
+        u.phone_number,
+        u.role_id,
+        CASE 
+           WHEN u.role_id = 2 THEN 'merchant'
+           WHEN u.role_id = 3 THEN 'supplier'
+           WHEN u.role_id = 4 THEN 'model'
+           ELSE 'user'
+        END as user_type,
+
+        bd.bank_name,
+        bd.account_holder_name,
+        bd.account_number,
+        bd.iban,
+        bd.iban_certificate_url
+
+      FROM wallet_transactions wt
+      JOIN wallets w ON wt.wallet_id = w.id
+      JOIN users u ON w.user_id = u.id
+      LEFT JOIN bank_details bd ON u.id = bd.user_id
+      
+      WHERE wt.id = ? AND wt.type = 'payout'
+    `,
+      [id],
+    );
+
+    if (details.length === 0) {
+      return res.status(404).json({ message: "لم يتم العثور على طلب السحب." });
+    }
+
+    const request = details[0];
+    request.amount = Math.abs(Number(request.amount)); // عرض موجب
+
+    res.json(request);
+  } catch (error) {
+    console.error("Error fetching payout details:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/**
+ * @desc    Admin: Update payout request status (Approve/Reject)
+ * @route   PUT /api/admin/payouts/:id
+ * @access  Private (Admin)
+ */
+exports.updatePayoutRequestStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params; // Transaction ID
+  const { status, notes } = req.body; // 'approved' or 'rejected'
+
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(400).json({ message: "Invalid status." });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. جلب المعاملة للتأكد منها
+    const [[trx]] = await connection.query(
+      "SELECT * FROM wallet_transactions WHERE id = ? AND type = 'payout' FOR UPDATE",
+      [id],
+    );
+
+    if (!trx) {
+      throw new Error("طلب السحب غير موجود");
+    }
+
+    if (trx.status !== "pending" && trx.status !== "processing") {
+      throw new Error("لا يمكن تعديل طلب تمت معالجته مسبقاً");
+    }
+
+    // 2. معالجة الطلب
+    if (status === "rejected") {
+      // --- حالة الرفض: إعادة الأموال ---
+      // السحب الأصلي كان بالسالب (مثلاً -500).
+      // لإعادة الأموال، ننشئ قيداً جديداً بالموجب (+500).
+
+      const refundAmount = Math.abs(trx.amount);
+
+      // أ) تسجيل معاملة استرداد
+      await connection.query(
+        `INSERT INTO wallet_transactions 
+         (wallet_id, amount, type, status, payment_method, reference_type, reference_id, description, created_at)
+         VALUES (?, ?, 'refund', 'cleared', 'system', 'payout', ?, ?, NOW())`,
+        [
+          trx.wallet_id,
+          refundAmount,
+          trx.id,
+          `استرداد طلب سحب مرفوض #${id}: ${notes || ""}`,
+        ],
+      );
+
+      // ب) إعادة الرصيد للمحفظة
+      await connection.query(
+        "UPDATE wallets SET balance = balance + ?, total_withdrawn = total_withdrawn - ? WHERE id = ?",
+        [refundAmount, refundAmount, trx.wallet_id],
+      );
+
+      // ج) تحديث حالة الطلب الأصلي إلى مرفوض/ملغى
+      await connection.query(
+        "UPDATE wallet_transactions SET status = 'cancelled', description = CONCAT(description, ' [مرفوض]') WHERE id = ?",
+        [id],
+      );
+    } else if (status === "approved") {
+      // --- حالة الموافقة ---
+      // المبلغ مخصوم بالفعل من الرصيد المتاح عند إنشاء الطلب (في requestPayout).
+      // فقط نغير الحالة من pending إلى cleared ليصبح نهائياً.
+
+      await connection.query(
+        "UPDATE wallet_transactions SET status = 'cleared', description = CONCAT(description, ' [تم التحويل]') WHERE id = ?",
+        [id],
+      );
+    }
+
+    await connection.commit();
+
+    // 3. إرسال الإشعار (خارج الـ Transaction لتجنب التأخير)
+    // نجلب بيانات المستخدم للإشعار
+    const [[user]] = await pool.query(
+      "SELECT u.id, u.email, u.name FROM users u JOIN wallets w ON u.id = w.user_id WHERE w.id = ?",
+      [trx.wallet_id],
+    );
+
+    if (user) {
+      const message = `تم ${status === "approved" ? "الموافقة على" : "رفض"} طلب السحب رقم #${id}.`;
+
+      // إشعار داخلي
+      await pool.query(
+        "INSERT INTO notifications (user_id, type, icon, message, link) VALUES (?, ?, ?, ?, ?)",
+        [user.id, "PAYOUT_UPDATE", "wallet", message, "/dashboard/wallet"],
+      );
+
+      // إشعار بريدي (اختياري)
+      // sendEmail(...)
+    }
+
+    res.json({ message: `Payout request has been ${status}.` });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Payout Update Error:", error);
+    res.status(500).json({ message: error.message || "Server error" });
+  } finally {
+    connection.release();
   }
 });

@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const asyncHandler = require("express-async-handler");
+const { recordTransaction } = require("./walletController");
 
 /**
  * @desc    Supplier submits their data for verification
@@ -8,17 +9,17 @@ const asyncHandler = require("express-async-handler");
  */
 exports.submitVerification = async (req, res) => {
   const supplierId = req.user.id;
-  
+
   // استقبال الحقول الجديدة (bank_name, account_holder_name) إذا توفرت
-  const { 
-    identity_number, 
-    business_name, 
-    account_number, 
-    iban, 
-    bank_name, 
-    account_holder_name 
+  const {
+    identity_number,
+    business_name,
+    account_number,
+    iban,
+    bank_name,
+    account_holder_name,
   } = req.body;
-  
+
   const files = req.files;
 
   if (
@@ -36,12 +37,16 @@ exports.submitVerification = async (req, res) => {
   const connection = await pool.getConnection();
   try {
     // جلب اسم المستخدم لاستخدامه كاحتياط لاسم صاحب الحساب
-    const [[user]] = await connection.query("SELECT name FROM users WHERE id = ?", [supplierId]);
+    const [[user]] = await connection.query(
+      "SELECT name FROM users WHERE id = ?",
+      [supplierId],
+    );
 
     // تحديد القيم الافتراضية للحقول الجديدة
     // للمورد: نفضل اسم صاحب الحساب القادم من الطلب > ثم اسم الشركة > ثم اسم المستخدم
-    const finalAccountHolder = account_holder_name || business_name || user.name || 'Unknown';
-    const finalBankName = bank_name || 'Bank';
+    const finalAccountHolder =
+      account_holder_name || business_name || user.name || "Unknown";
+    const finalBankName = bank_name || "Bank";
 
     await connection.beginTransaction();
 
@@ -58,7 +63,7 @@ exports.submitVerification = async (req, res) => {
         files.identity_image[0].path,
         files.business_license ? files.business_license[0].path : null,
         supplierId,
-      ]
+      ],
     );
 
     // 2. إدخال أو تحديث البيانات في الجدول الموحد `bank_details`
@@ -75,13 +80,13 @@ exports.submitVerification = async (req, res) => {
               status = 'pending',
               is_verified = 0`,
       [
-        supplierId, 
-        finalBankName,       // الحقل الجديد
-        finalAccountHolder,  // الحقل الجديد
-        account_number, 
-        iban, 
-        files.iban_certificate[0].path
-      ]
+        supplierId,
+        finalBankName, // الحقل الجديد
+        finalAccountHolder, // الحقل الجديد
+        account_number,
+        iban,
+        files.iban_certificate[0].path,
+      ],
     );
 
     await connection.commit();
@@ -110,7 +115,7 @@ exports.getSupplierDashboardStats = asyncHandler(async (req, res) => {
             -- 1. عدد المنتجات
             (SELECT COUNT(*) FROM supplier_products WHERE supplier_id = ?) as total_products,
             
-            -- 2. عدد الطلبات (كما هو سابقاً)
+            -- 2. عدد الطلبات (التي تحتوي على منتجات هذا المورد)
             (SELECT COUNT(DISTINCT o.id) 
                 FROM orders o
                 JOIN order_items oi ON o.id = oi.order_id
@@ -119,23 +124,20 @@ exports.getSupplierDashboardStats = asyncHandler(async (req, res) => {
                 JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
                 WHERE spv.product_id IN (SELECT id FROM supplier_products WHERE supplier_id = ?)) as total_orders,
 
-            -- 3. ✅ الرصيد المتاح (Available Balance)
-            -- المعادلة: الأرباح المكتملة (cleared) ناقص السحوبات (payout)
-            (
-                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
-                - 
-                (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'payout')
-            ) as current_balance
+            -- 3. ✅ الرصيد المتاح (تم التصحيح: القراءة من جدول wallets مباشرة)
+            (SELECT COALESCE(balance, 0.00) FROM wallets WHERE user_id = ?) as current_balance
         `,
-      // ⚠️ انتبه: نحتاج تمرير supplierId 4 مرات الآن (واحدة للمنتجات، واحدة للطلبات، واثنتان للمعادلة الحسابية)
-      [supplierId, supplierId, supplierId, supplierId]
+      // نمرر supplierId 3 مرات فقط الآن
+      [supplierId, supplierId, supplierId],
     );
 
+    // التحقق من وجود بيانات
+    const data = stats[0] || {};
+
     res.json({
-      totalProducts: stats[0].total_products || 0,
-      totalOrders: stats[0].total_orders || 0,
-      // إرجاع الرصيد المتاح
-      currentBalance: parseFloat(stats[0].current_balance || 0).toFixed(2),
+      totalProducts: Number(data.total_products || 0),
+      totalOrders: Number(data.total_orders || 0),
+      currentBalance: Number(data.current_balance || 0).toFixed(2),
     });
   } catch (error) {
     console.error("Error fetching supplier dashboard stats:", error);
@@ -166,7 +168,7 @@ exports.createSupplierProduct = asyncHandler(async (req, res) => {
 
     const [productResult] = await connection.query(
       "INSERT INTO supplier_products (supplier_id, name, brand, description) VALUES (?, ?, ?, ?)",
-      [supplierId, name, brand, description]
+      [supplierId, name, brand, description],
     );
     const productId = productResult.insertId;
 
@@ -179,7 +181,7 @@ exports.createSupplierProduct = asyncHandler(async (req, res) => {
           variant.cost_price,
           variant.stock_quantity,
           variant.sku,
-        ]
+        ],
       );
       const variantId = variantResult.insertId;
 
@@ -187,7 +189,7 @@ exports.createSupplierProduct = asyncHandler(async (req, res) => {
         const imageValues = variant.images.map((url) => [variantId, url]);
         await connection.query(
           "INSERT INTO supplier_variant_images (variant_id, image_url) VALUES ?",
-          [imageValues]
+          [imageValues],
         );
       }
     }
@@ -196,7 +198,7 @@ exports.createSupplierProduct = asyncHandler(async (req, res) => {
       const categoryValues = categoryIds.map((catId) => [productId, catId]);
       await connection.query(
         "INSERT INTO supplier_product_categories (product_id, category_id) VALUES ?",
-        [categoryValues]
+        [categoryValues],
       );
     }
 
@@ -243,7 +245,7 @@ exports.getSupplierProducts = asyncHandler(async (req, res) => {
     GROUP BY p.id
     ORDER BY p.created_at DESC;
     `,
-    [supplierId]
+    [supplierId],
   );
 
   // Manually parse the GROUP_CONCAT strings into a structured JSON response
@@ -293,7 +295,7 @@ exports.getSupplierProducts = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Update a supplier's product with variants and categories
+ * @desc    Update a supplier's product with variants and categories (With Merchant Sync)
  * @route   PUT /api/supplier/products/:id
  * @access  Private/Supplier
  */
@@ -302,51 +304,79 @@ exports.updateSupplierProduct = asyncHandler(async (req, res) => {
   const supplierId = req.user.id;
   const { name, brand, description, variants, categoryIds } = req.body;
 
+  // حماية ضد البيانات الفارغة
+  const safeVariants = Array.isArray(variants) ? variants : [];
+
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
 
-    // 1. Verify this product actually belongs to the supplier
+    // 1. التحقق من ملكية المنتج
     const [[productCheck]] = await connection.query(
       "SELECT id FROM supplier_products WHERE id = ? AND supplier_id = ?",
-      [productId, supplierId]
+      [productId, supplierId],
     );
 
     if (!productCheck) {
       await connection.rollback();
       return res.status(404).json({
-        message: "Product not found or you don't have permission to edit it.",
+        message: "المنتج غير موجود أو ليس لديك صلاحية تعديله.",
       });
     }
 
-    // 2. Update main product details
+    // 2. تحديث البيانات الأساسية للمنتج
     await connection.query(
       "UPDATE supplier_products SET name = ?, brand = ?, description = ? WHERE id = ?",
-      [name, brand, description, productId]
+      [name, brand, description, productId],
     );
 
-    // --- Full Variant Synchronization Logic for the Supplier ---
+    // ============================================================
+    // 3. إدارة المتغيرات (Variants) مع المزامنة للتجار
+    // ============================================================
+
+    // جلب المتغيرات الحالية
     const [existingVariants] = await connection.query(
       "SELECT id FROM supplier_product_variants WHERE product_id = ?",
-      [productId]
+      [productId],
     );
     const existingVariantIds = existingVariants.map((v) => v.id);
-    const submittedVariantIds = variants.map((v) => v.id).filter(Boolean);
+    const submittedVariantIds = safeVariants.map((v) => v.id).filter(Boolean);
 
+    // أ) حذف المتغيرات التي قام المورد بإزالتها
     const variantsToDelete = existingVariantIds.filter(
-      (id) => !submittedVariantIds.includes(id)
+      (id) => !submittedVariantIds.includes(id),
     );
+
     if (variantsToDelete.length > 0) {
-      // This will cascade and delete images due to DB constraints
+      // ⚠️ هام: قبل الحذف، يجب تعطيل متغيرات التجار المرتبطة بهذه المتغيرات
+      // نجعل مخزون التاجر 0 للمتغيرات المحذوفة
+      await connection.query(
+        `
+        UPDATE product_variants pv
+        JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+        SET pv.stock_quantity = 0
+        WHERE dl.supplier_variant_id IN (?)
+      `,
+        [variantsToDelete],
+      );
+
+      // حذف الرابط من جدول الدروبشيبينغ (اختياري، أو تركه للأرشيف)
+      await connection.query(
+        "DELETE FROM dropship_links WHERE supplier_variant_id IN (?)",
+        [variantsToDelete],
+      );
+
+      // الآن نحذف متغير المورد
       await connection.query(
         "DELETE FROM supplier_product_variants WHERE id IN (?)",
-        [variantsToDelete]
+        [variantsToDelete],
       );
     }
 
-    for (const variant of variants) {
+    // ب) إضافة أو تحديث المتغيرات
+    for (const variant of safeVariants) {
       if (variant.id && submittedVariantIds.includes(variant.id)) {
-        // Update existing variant
+        // --- تحديث متغير موجود ---
         await connection.query(
           "UPDATE supplier_product_variants SET color = ?, cost_price = ?, stock_quantity = ?, sku = ? WHERE id = ?",
           [
@@ -355,22 +385,35 @@ exports.updateSupplierProduct = asyncHandler(async (req, res) => {
             variant.stock_quantity,
             variant.sku,
             variant.id,
-          ]
+          ],
         );
-        // Resync images: delete old, insert new
+
+        // 🔥🔥🔥 المزامنة الحية (Live Sync): تحديث مخزون التجار فوراً
+        // لا نحدث السعر (price) لأن التاجر يضع سعره الخاص، لكن المخزون (stock) يجب أن يتطابق
+        await connection.query(
+          `
+            UPDATE product_variants pv
+            JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+            SET pv.stock_quantity = ? 
+            WHERE dl.supplier_variant_id = ?
+        `,
+          [variant.stock_quantity, variant.id],
+        );
+
+        // تحديث الصور
         await connection.query(
           "DELETE FROM supplier_variant_images WHERE variant_id = ?",
-          [variant.id]
+          [variant.id],
         );
         if (variant.images && variant.images.length > 0) {
           const imageValues = variant.images.map((url) => [variant.id, url]);
           await connection.query(
             "INSERT INTO supplier_variant_images (variant_id, image_url) VALUES ?",
-            [imageValues]
+            [imageValues],
           );
         }
       } else {
-        // Insert new variant
+        // --- إضافة متغير جديد ---
         const [newVariantResult] = await connection.query(
           "INSERT INTO supplier_product_variants (product_id, color, cost_price, stock_quantity, sku) VALUES (?, ?, ?, ?, ?)",
           [
@@ -379,38 +422,46 @@ exports.updateSupplierProduct = asyncHandler(async (req, res) => {
             variant.cost_price,
             variant.stock_quantity,
             variant.sku,
-          ]
+          ],
         );
         const newVariantId = newVariantResult.insertId;
+
         if (variant.images && variant.images.length > 0) {
           const imageValues = variant.images.map((url) => [newVariantId, url]);
           await connection.query(
             "INSERT INTO supplier_variant_images (variant_id, image_url) VALUES ?",
-            [imageValues]
+            [imageValues],
           );
         }
+
+        // ملاحظة: المتغيرات الجديدة لن تظهر عند التاجر تلقائياً،
+        // يجب على التاجر إعادة استيراد المنتج أو يتم إرسال إشعار له بوجود "موديلات جديدة".
       }
     }
 
-    // --- Category Synchronization ---
+    // 4. تحديث التصنيفات (Categories)
     await connection.query(
       "DELETE FROM supplier_product_categories WHERE product_id = ?",
-      [productId]
+      [productId],
     );
     if (categoryIds && categoryIds.length > 0) {
       const categoryValues = categoryIds.map((catId) => [productId, catId]);
       await connection.query(
         "INSERT INTO supplier_product_categories (product_id, category_id) VALUES ?",
-        [categoryValues]
+        [categoryValues],
       );
     }
 
+    // 5. (إضافي) إرسال إشعار للتجار المرتبطين (فكرة اختيارية)
+    // يمكن هنا إضافة كود لإدخال إشعار في جدول notifications لكل تاجر يبيع هذا المنتج
+    // "قام المورد بتحديث مواصفات المنتج X"
+
     await connection.commit();
-    res.json({ message: "تم تحديث المنتج بنجاح." });
+    res.json({ message: "تم تحديث المنتج ومزامنة المخزون مع التجار بنجاح." });
   } catch (error) {
     await connection.rollback();
     console.error("Error updating supplier product:", error);
-    res.status(500).json({ message: "Failed to update product." });
+    res.status(500).json({ message: "فشل تحديث المنتج." });
   } finally {
     connection.release();
   }
@@ -427,7 +478,7 @@ exports.deleteSupplierProduct = async (req, res) => {
   try {
     const [result] = await pool.query(
       "DELETE FROM supplier_products WHERE id = ? AND supplier_id = ?",
-      [id, supplierId]
+      [id, supplierId],
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({
@@ -443,7 +494,7 @@ exports.deleteSupplierProduct = async (req, res) => {
 
 exports.getCategoriesForForm = asyncHandler(async (req, res) => {
   const [categories] = await pool.query(
-    "SELECT id, name FROM categories WHERE parent_id IS NOT NULL ORDER BY name ASC"
+    "SELECT id, name FROM categories WHERE parent_id IS NOT NULL ORDER BY name ASC",
   );
   res.json(categories);
 });
@@ -483,7 +534,7 @@ exports.getSupplierOrders = asyncHandler(async (req, res) => {
         WHERE sp.supplier_id = ?
         ORDER BY o.created_at DESC;
         `,
-    [supplierId]
+    [supplierId],
   );
 
   res.status(200).json(orders);
@@ -495,29 +546,29 @@ exports.getSupplierOrders = asyncHandler(async (req, res) => {
  * @access  Private/Supplier
  */
 exports.getSupplierOrderDetails = asyncHandler(async (req, res) => {
-    const { id: orderId } = req.params;
-    const supplierId = req.user.id;
+  const { id: orderId } = req.params;
+  const supplierId = req.user.id;
 
-    try {
-        // --- Step 1: Authorization Check ---
-        const [authCheck] = await pool.query(
-            `SELECT oi.id 
+  try {
+    // --- Step 1: Authorization Check ---
+    const [authCheck] = await pool.query(
+      `SELECT oi.id 
              FROM order_items oi
              JOIN product_variants pv ON oi.product_variant_id = pv.id
              JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
              JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
              WHERE oi.order_id = ? AND spv.product_id IN (SELECT id FROM supplier_products WHERE supplier_id = ?) 
              LIMIT 1`,
-            [orderId, supplierId]
-        );
+      [orderId, supplierId],
+    );
 
-        if (authCheck.length === 0) {
-            return res.status(404).json({ message: "الطلب غير موجود أو لا يخصك." });
-        }
+    if (authCheck.length === 0) {
+      return res.status(404).json({ message: "الطلب غير موجود أو لا يخصك." });
+    }
 
-        // --- Step 2: Fetch All Order Details (including payment_method) ---
-        const [[order]] = await pool.query(
-            `SELECT
+    // --- Step 2: Fetch All Order Details (including payment_method) ---
+    const [[order]] = await pool.query(
+      `SELECT
                 o.id, o.created_at, o.status, o.shipping_cost, o.total_amount, o.payment_method,
                 cust.name AS customer_name, cust.email AS customer_email,
                 addr.full_name as shipping_name, addr.address_line_1, addr.city, addr.country, addr.phone_number as shipping_phone
@@ -525,12 +576,12 @@ exports.getSupplierOrderDetails = asyncHandler(async (req, res) => {
             JOIN users cust ON o.customer_id = cust.id
             LEFT JOIN addresses addr ON o.shipping_address_id = addr.id
             WHERE o.id = ?`,
-            [orderId]
-        );
+      [orderId],
+    );
 
-        // --- Step 3: Fetch ONLY the items belonging to this supplier ---
-        const [items] = await pool.query(
-            `SELECT 
+    // --- Step 3: Fetch ONLY the items belonging to this supplier ---
+    const [items] = await pool.query(
+      `SELECT 
                 p.name AS product_name, pv.color AS variant_color, oi.quantity, spv.cost_price
             FROM order_items oi
             JOIN product_variants pv ON oi.product_variant_id = pv.id
@@ -538,34 +589,304 @@ exports.getSupplierOrderDetails = asyncHandler(async (req, res) => {
             JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
             JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
             WHERE oi.order_id = ? AND spv.product_id IN (SELECT id FROM supplier_products WHERE supplier_id = ?)`,
-            [orderId, supplierId]
-        );
+      [orderId, supplierId],
+    );
 
-        // --- Step 4: Assemble the final response ---
-        const orderDetails = {
-            order_id: order.id,
-            order_date: order.created_at,
-            order_status: order.status,
-            shipping_cost: order.shipping_cost,
-            total_amount: order.total_amount,
-            payment_method: order.payment_method, // Added payment method
-            customer: { name: order.customer_name, email: order.customer_email },
-            shipping_address: { name: order.shipping_name, address: order.address_line_1, city: order.city, country: order.country, phone: order.shipping_phone },
-            items: items.map(item => ({
-                name: item.product_name,
-                color: item.variant_color,
-                quantity: item.quantity,
-                cost_price: item.cost_price,
-                total_cost: item.quantity * item.cost_price,
-            }))
-        };
+    // --- Step 4: Assemble the final response ---
+    const orderDetails = {
+      order_id: order.id,
+      order_date: order.created_at,
+      order_status: order.status,
+      shipping_cost: order.shipping_cost,
+      total_amount: order.total_amount,
+      payment_method: order.payment_method, // Added payment method
+      customer: { name: order.customer_name, email: order.customer_email },
+      shipping_address: {
+        name: order.shipping_name,
+        address: order.address_line_1,
+        city: order.city,
+        country: order.country,
+        phone: order.shipping_phone,
+      },
+      items: items.map((item) => ({
+        name: item.product_name,
+        color: item.variant_color,
+        quantity: item.quantity,
+        cost_price: item.cost_price,
+        total_cost: item.quantity * item.cost_price,
+      })),
+    };
 
-        res.status(200).json(orderDetails);
-    } catch (error) {
-        console.error("❌ [ORDERS] Error fetching supplier order details:", error);
-        res.status(500).json({ message: "حدث خطأ أثناء جلب تفاصيل الطلب." });
-    }
+    res.status(200).json(orderDetails);
+  } catch (error) {
+    console.error("❌ [ORDERS] Error fetching supplier order details:", error);
+    res.status(500).json({ message: "حدث خطأ أثناء جلب تفاصيل الطلب." });
+  }
 });
+// ===================================================================================
+//  🔥 FINANCIAL ENGINE (النسخة الشاملة: تسجيل الخصومات في كل الحالات)
+// ===================================================================================
+const calculateAndRegisterEarnings = async (orderId, connection) => {
+  console.log(`💰 [Finance] Starting Split Calculation for Order #${orderId}`);
+
+  // 1. بيانات الطلب
+  const [[orderMeta]] = await connection.query(
+    "SELECT payment_method, shipping_cost, shipping_company_id FROM orders WHERE id = ?",
+    [orderId],
+  );
+
+  const isCOD = orderMeta.payment_method === "cod";
+  const globalShippingCost = Number(orderMeta.shipping_cost || 0);
+
+  // 2. الإعدادات
+  const [settings] = await connection.query(
+    "SELECT setting_key, setting_value FROM platform_settings WHERE setting_key IN ('commission_rate', 'shipping_commission_rate', 'clearance_days')",
+  );
+  const config = settings.reduce((acc, row) => {
+    acc[row.setting_key] = parseFloat(row.setting_value);
+    return acc;
+  }, {});
+
+  const commissionRate = (config.commission_rate || 10) / 100;
+  const shippingCommRate = (config.shipping_commission_rate || 10) / 100;
+  const clearanceDays = config.clearance_days || 14;
+  const availableAt = new Date();
+  availableAt.setDate(availableAt.getDate() + clearanceDays);
+
+  // 3. جلب العناصر
+  const [items] = await connection.query(
+    `SELECT oi.*, p.merchant_id, p.name as product_name, 
+            sp.supplier_id, spv.cost_price 
+     FROM order_items oi
+     JOIN products p ON oi.product_id = p.id
+     LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
+     LEFT JOIN dropship_links dl ON pv.id = dl.merchant_variant_id
+     LEFT JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
+     LEFT JOIN supplier_products sp ON spv.product_id = sp.id
+     WHERE oi.order_id = ?`,
+    [orderId],
+  );
+
+  const firstSupplierItem = items.find((i) => i.supplier_id);
+  const defaultShippingOwnerId = firstSupplierItem
+    ? firstSupplierItem.supplier_id
+    : items[0]?.merchant_id;
+
+  // --- دالة مساعدة لتسجيل العمليات (إجمالي + خصم) ---
+  const registerSplitTransaction = async (
+    userId,
+    grossAmount,
+    commissionAmount,
+    desc,
+    typeOverride = "sale_earning",
+  ) => {
+    if (isCOD) {
+      // COD: نخصم العمولة فقط (لأن التاجر معه الكاش)
+      await recordTransaction(
+        {
+          userId,
+          amount: -commissionAmount, // بالسالب
+          type: "cod_commission_deduction",
+          status: "cleared", // دين حال
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `خصم عمولة منصة (${desc})`,
+          availableAt: null,
+        },
+        connection,
+      );
+    } else {
+      // Card: نسجل الإيداع الكلي ثم نخصم العمولة (لتوحيد التقارير)
+
+      // 1. إيداع المبلغ الكلي (إجمالي المبيعات)
+      await recordTransaction(
+        {
+          userId,
+          amount: grossAmount,
+          type: typeOverride,
+          status: "pending",
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `إجمالي مبيعات (${desc})`,
+          availableAt,
+        },
+        connection,
+      );
+
+      // 2. خصم العمولة (هنا يتم تسجيل الخصم الذي كنت تبحث عنه)
+      await recordTransaction(
+        {
+          userId,
+          amount: -commissionAmount,
+          type: "commission_deduction", // نوع جديد لتمييزه عن COD
+          status: "pending", // معلق لأنه يخصم من رصيد معلق
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `خصم عمولة منصة (${desc})`,
+          availableAt, // يتحرر الخصم مع تحرر المبلغ الأصلي
+        },
+        connection,
+      );
+    }
+  };
+
+  // 4. معالجة المنتجات
+  for (const item of items) {
+    const qty = Number(item.quantity);
+    const sellingPriceTotal = Number(item.price) * qty;
+
+    if (item.supplier_id && item.cost_price) {
+      // --- دروبشيبينغ ---
+      const costPriceTotal = Number(item.cost_price) * qty;
+      const supplierCommission = costPriceTotal * commissionRate;
+
+      // المورد: (له التكلفة، عليه عمولة)
+      await registerSplitTransaction(
+        item.supplier_id,
+        costPriceTotal,
+        supplierCommission,
+        `منتج: ${item.product_name}`,
+      );
+
+      // التاجر: (له الربح، عليه عمولة)
+      const grossProfit = sellingPriceTotal - costPriceTotal;
+      const merchantCommission = grossProfit * commissionRate;
+
+      await registerSplitTransaction(
+        item.merchant_id,
+        grossProfit,
+        merchantCommission,
+        `ربح بيع: ${item.product_name}`,
+      );
+    } else {
+      // --- منتج عادي ---
+      const merchantCommission = sellingPriceTotal * commissionRate;
+
+      await registerSplitTransaction(
+        item.merchant_id,
+        sellingPriceTotal,
+        merchantCommission,
+        `منتج: ${item.product_name}`,
+      );
+    }
+  }
+
+  // =========================================================
+  // 5. معالجة الشحن (تطبيق نفس المنطق)
+  // =========================================================
+
+  const processShippingTransaction = async (ownerId, cost, descName) => {
+    const shipFee = cost * shippingCommRate;
+
+    if (isCOD) {
+      // COD: خصم فقط
+      await recordTransaction(
+        {
+          userId: ownerId,
+          amount: -shipFee,
+          type: "cod_commission_deduction",
+          status: "cleared",
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `خصم عمولة شحن (${descName})`,
+          availableAt: null,
+        },
+        connection,
+      );
+    } else {
+      // Card: إيداع شحن + خصم عمولة
+
+      // 1. إيداع الشحن
+      await recordTransaction(
+        {
+          userId: ownerId,
+          amount: cost,
+          type: "shipping_earning",
+          status: "pending",
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `عائد شحن (${descName})`,
+          availableAt,
+        },
+        connection,
+      );
+
+      // 2. خصم العمولة
+      await recordTransaction(
+        {
+          userId: ownerId,
+          amount: -shipFee,
+          type: "commission_deduction",
+          status: "pending",
+          paymentMethod: "system",
+          referenceType: "order",
+          referenceId: orderId,
+          description: `خصم عمولة شحن (${descName})`,
+          availableAt,
+        },
+        connection,
+      );
+    }
+  };
+
+  // أ) البحث في جدول الاختيارات
+  const [shippingSelections] = await connection.query(
+    "SELECT * FROM order_shipping_selections WHERE order_id = ?",
+    [orderId],
+  );
+
+  let shippingHandled = false;
+
+  if (shippingSelections.length > 0) {
+    for (const sel of shippingSelections) {
+      const [[company]] = await connection.query(
+        "SELECT shipping_cost, merchant_id as owner_id, name FROM shipping_companies WHERE id = ?",
+        [sel.shipping_option_id],
+      );
+      if (company) {
+        await processShippingTransaction(
+          company.owner_id,
+          Number(company.shipping_cost),
+          company.name,
+        );
+        shippingHandled = true;
+      }
+    }
+  }
+
+  // ب) الخطة البديلة (Fallback)
+  if (!shippingHandled && globalShippingCost > 0) {
+    let shippingOwnerId = defaultShippingOwnerId;
+    let companyName = "شحن عام";
+
+    if (orderMeta.shipping_company_id) {
+      const [[company]] = await connection.query(
+        "SELECT merchant_id as owner_id, name FROM shipping_companies WHERE id = ?",
+        [orderMeta.shipping_company_id],
+      );
+      if (company) {
+        shippingOwnerId = company.owner_id;
+        companyName = company.name;
+      }
+    }
+
+    if (shippingOwnerId) {
+      await processShippingTransaction(
+        shippingOwnerId,
+        globalShippingCost,
+        companyName,
+      );
+    }
+  }
+};
+// ===================================================================================
+//  CONTROLLER
+// ===================================================================================
 
 /**
  * @desc    Allows a supplier to update the status of an order they are involved in.
@@ -586,7 +907,7 @@ exports.updateSupplierOrderStatus = asyncHandler(async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // 1. Authorization Check: Verify this supplier is part of the order.
+    // 1. التحقق من الصلاحية: هل هذا الطلب يخص المورد؟
     const [authItems] = await connection.query(
       `SELECT oi.id 
              FROM order_items oi
@@ -595,85 +916,55 @@ exports.updateSupplierOrderStatus = asyncHandler(async (req, res) => {
              JOIN supplier_product_variants spv ON dl.supplier_variant_id = spv.id
              JOIN supplier_products sp ON spv.product_id = sp.id
              WHERE oi.order_id = ? AND sp.supplier_id = ?`,
-      [orderId, supplierId]
+      [orderId, supplierId],
     );
 
     if (authItems.length === 0) {
       await connection.rollback();
-      return res
-        .status(403)
-        .json({
-          message: "لا تملك صلاحية تعديل هذا الطلب لأنه لا يحتوي على منتجاتك.",
-        });
+      return res.status(403).json({
+        message: "لا تملك صلاحية تعديل هذا الطلب لأنه لا يحتوي على منتجاتك.",
+      });
     }
 
-    // 2. Update the order status
+    // جلب معلومات الطلب الحالية للتحقق من طريقة الدفع
+    const [[order]] = await connection.query(
+      "SELECT * FROM orders WHERE id = ? FOR UPDATE",
+      [orderId],
+    );
+
+    // 2. تحديث حالة الطلب
     await connection.query("UPDATE orders SET status = ? WHERE id = ?", [
       status,
       orderId,
     ]);
 
-    // ✅ FIX: START OF THE NEW EARNINGS PROCESSING LOGIC
-    if (status === "completed") {
+    // 🔥 3. المعالجة المالية (نفس منطق التاجر بالضبط)
+    // إذا كان الطلب COD، وأصبح مكتمل، ولم يتم تسجيل الأرباح من قبل -> سجلها الآن
+    if (
+      order.payment_method === "cod" &&
+      status === "completed" &&
+      !order.earnings_cleared
+    ) {
       console.log(
-        `[Earnings] Order #${orderId} marked as 'completed'. Starting earnings release process.`
+        `💰 Supplier Completed COD Order #${orderId}. Registering Earnings...`,
       );
 
-      // a) Check if earnings have already been cleared to prevent double processing
-      const [[order]] = await connection.query(
-        "SELECT earnings_cleared FROM orders WHERE id = ? FOR UPDATE",
-        [orderId]
+      // حساب وتسجيل الأرباح (معلقة Pending)
+      await calculateAndRegisterEarnings(orderId, connection);
+
+      // وضع علامة أن الأرباح سُجلت لمنع التكرار
+      await connection.query(
+        "UPDATE orders SET payment_status = 'paid', earnings_cleared = 1 WHERE id = ?",
+        [orderId],
       );
-
-      if (order && !order.earnings_cleared) {
-        // b) Find all pending transactions for this order
-        const [pendingTransactions] = await connection.query(
-          "SELECT id, user_id, amount FROM wallet_transactions WHERE related_entity_type = 'order' AND related_entity_id = ? AND status = 'pending_clearance'",
-          [orderId]
-        );
-
-        if (pendingTransactions.length > 0) {
-          console.log(
-            `[Earnings] Found ${pendingTransactions.length} pending transaction(s) for order #${orderId}.`
-          );
-
-          // c) Update each transaction's status to 'cleared'
-          for (const trx of pendingTransactions) {
-            await connection.query(
-              "UPDATE wallet_transactions SET status = 'cleared', cleared_at = NOW() WHERE id = ?",
-              [trx.id]
-            );
-            console.log(
-              `[Earnings] Transaction #${trx.id} for user #${trx.user_id} (Amount: ${trx.amount}) has been cleared.`
-            );
-          }
-
-          // d) Mark the order as cleared to prevent this logic from running again
-          await connection.query(
-            "UPDATE orders SET earnings_cleared = TRUE WHERE id = ?",
-            [orderId]
-          );
-          console.log(
-            `[Earnings] Order #${orderId} has been marked as earnings_cleared.`
-          );
-        } else {
-          console.log(
-            `[Earnings] No pending transactions found for order #${orderId}. Nothing to clear.`
-          );
-        }
-      } else {
-        console.log(
-          `[Earnings] Earnings for order #${orderId} have already been cleared. Skipping.`
-        );
-      }
     }
-    // ✅ FIX: END OF THE NEW EARNINGS PROCESSING LOGIC
 
-    // 3. Notify the customer about the status update
+    // 4. إرسال إشعار للعميل
     const [[orderInfo]] = await connection.query(
       "SELECT customer_id FROM orders WHERE id = ?",
-      [orderId]
+      [orderId],
     );
+
     if (orderInfo) {
       const message = `تم تحديث حالة طلبك رقم #${orderId} إلى: ${status}.`;
       await connection.query(
@@ -684,7 +975,7 @@ exports.updateSupplierOrderStatus = asyncHandler(async (req, res) => {
           "bell",
           message,
           `/dashboard/my-orders/${orderId}`,
-        ]
+        ],
       );
     }
 
@@ -705,11 +996,11 @@ exports.updateSupplierOrderStatus = asyncHandler(async (req, res) => {
  * @access  Private/Supplier
  */
 exports.getSupplierWallet = async (req, res) => {
-    const supplierId = req.user.id;
-    try {
-        // ✅ تصحيح: حساب الرصيد الصافي (الأرباح المكتملة - السحوبات)
-        // الأرباح المعلقة تظل كما هي للعرض فقط
-        const query = `
+  const supplierId = req.user.id;
+  try {
+    // ✅ تصحيح: حساب الرصيد الصافي (الأرباح المكتملة - السحوبات)
+    // الأرباح المعلقة تظل كما هي للعرض فقط
+    const query = `
             SELECT
                 (
                     (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
@@ -720,17 +1011,21 @@ exports.getSupplierWallet = async (req, res) => {
                 (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'pending_clearance') AS pending_clearance
             FROM DUAL;
         `;
-        // نمرر supplierId ثلاث مرات للمعاملات الثلاث
-        const [[wallet]] = await pool.query(query, [supplierId, supplierId, supplierId]);
+    // نمرر supplierId ثلاث مرات للمعاملات الثلاث
+    const [[wallet]] = await pool.query(query, [
+      supplierId,
+      supplierId,
+      supplierId,
+    ]);
 
-        res.json({
-            balance: parseFloat(wallet.balance || 0).toFixed(2),
-            pending_clearance: parseFloat(wallet.pending_clearance || 0).toFixed(2),
-        });
-    } catch (error) {
-        console.error("Error fetching supplier wallet data:", error);
-        res.status(500).json({ message: "Server error" });
-    }
+    res.json({
+      balance: parseFloat(wallet.balance || 0).toFixed(2),
+      pending_clearance: parseFloat(wallet.pending_clearance || 0).toFixed(2),
+    });
+  } catch (error) {
+    console.error("Error fetching supplier wallet data:", error);
+    res.status(500).json({ message: "Server error" });
+  }
 };
 
 /**
@@ -739,72 +1034,76 @@ exports.getSupplierWallet = async (req, res) => {
  * @access  Private/Supplier
  */
 exports.requestPayout = asyncHandler(async (req, res) => {
-    const supplierId = req.user.id;
-    const { amount } = req.body;
+  const supplierId = req.user.id;
+  const { amount } = req.body;
 
-    if (!amount || isNaN(amount) || amount <= 0) {
-        return res.status(400).json({ message: "الرجاء إدخال مبلغ صحيح." });
-    }
+  if (!amount || isNaN(amount) || amount <= 0) {
+    return res.status(400).json({ message: "الرجاء إدخال مبلغ صحيح." });
+  }
 
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
 
-        // 1. ✅ حساب الرصيد الفعلي المتاح للسحب من جدول المعاملات (نفس منطق العرض)
-        // المعادلة: (مجموع الأرباح المكتملة) - (مجموع عمليات السحب السابقة)
-        const [[balanceResult]] = await connection.query(`
+    // 1. ✅ حساب الرصيد الفعلي المتاح للسحب من جدول المعاملات (نفس منطق العرض)
+    // المعادلة: (مجموع الأرباح المكتملة) - (مجموع عمليات السحب السابقة)
+    const [[balanceResult]] = await connection.query(
+      `
             SELECT 
                 (
                     (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND status = 'cleared' AND type = 'earning') 
                     - 
                     (SELECT COALESCE(SUM(amount), 0) FROM wallet_transactions WHERE user_id = ? AND type = 'payout')
                 ) as current_balance
-        `, [supplierId, supplierId]);
+        `,
+      [supplierId, supplierId],
+    );
 
-        const currentBalance = parseFloat(balanceResult.current_balance || 0);
+    const currentBalance = parseFloat(balanceResult.current_balance || 0);
 
-        console.log(`[Payout] User: ${supplierId}, Requested: ${amount}, Available: ${currentBalance}`);
+    console.log(
+      `[Payout] User: ${supplierId}, Requested: ${amount}, Available: ${currentBalance}`,
+    );
 
-        if (amount > currentBalance) {
-            await connection.rollback();
-            return res.status(400).json({ 
-                message: "المبلغ المطلوب أكبر من رصيدك المتاح.",
-                debug_info: `Available: ${currentBalance}, Requested: ${amount}` 
-            });
-        }
+    if (amount > currentBalance) {
+      await connection.rollback();
+      return res.status(400).json({
+        message: "المبلغ المطلوب أكبر من رصيدك المتاح.",
+        debug_info: `Available: ${currentBalance}, Requested: ${amount}`,
+      });
+    }
 
-        // 2. ✅ تسجيل طلب السحب في جدول طلبات السحب (للمسؤول)
-        const [payoutResult] = await connection.query(
-            "INSERT INTO supplier_payout_requests (supplier_id, amount, status) VALUES (?, ?, 'pending')",
-            [supplierId, amount]
-        );
+    // 2. ✅ تسجيل طلب السحب في جدول طلبات السحب (للمسؤول)
+    const [payoutResult] = await connection.query(
+      "INSERT INTO supplier_payout_requests (supplier_id, amount, status) VALUES (?, ?, 'pending')",
+      [supplierId, amount],
+    );
 
-        // 3. ✅ تسجيل عملية "خصم" في جدول المعاملات فوراً لتقليل الرصيد
-        // هذا يضمن أن المستخدم لا يستطيع سحب نفس المبلغ مرتين
-        await connection.query(
-            `INSERT INTO wallet_transactions 
+    // 3. ✅ تسجيل عملية "خصم" في جدول المعاملات فوراً لتقليل الرصيد
+    // هذا يضمن أن المستخدم لا يستطيع سحب نفس المبلغ مرتين
+    await connection.query(
+      `INSERT INTO wallet_transactions 
             (user_id, amount, type, status, description, related_entity_type, related_entity_id, created_at) 
             VALUES (?, ?, 'payout', 'pending', ?, 'payout_request', ?, NOW())`,
-            [
-                supplierId, 
-                amount, // يمكن تسجيلها كموجب ونطرحها في الاستعلام، أو سالب ونجمعها. الكود أعلاه يطرح الـ payout
-                `طلب سحب أرباح رقم #${payoutResult.insertId}`,
-                payoutResult.insertId
-            ]
-        );
+      [
+        supplierId,
+        amount, // يمكن تسجيلها كموجب ونطرحها في الاستعلام، أو سالب ونجمعها. الكود أعلاه يطرح الـ payout
+        `طلب سحب أرباح رقم #${payoutResult.insertId}`,
+        payoutResult.insertId,
+      ],
+    );
 
-        // ملاحظة: قمنا بإلغاء التحديث في supplier_wallets لأنه غير مستخدم في منطق العرض المحدث
+    // ملاحظة: قمنا بإلغاء التحديث في supplier_wallets لأنه غير مستخدم في منطق العرض المحدث
 
-        await connection.commit();
-        res.status(201).json({ message: "تم إرسال طلب سحب الأرباح بنجاح." });
-
-    } catch (error) {
-        await connection.rollback();
-        console.error("Error requesting supplier payout:", error);
-        res.status(500).json({ message: "حدث خطأ أثناء معالجة طلبك." });
-    } finally {
-        connection.release();
-    }
+    await connection.commit();
+    res.status(201).json({ message: "تم إرسال طلب سحب الأرباح بنجاح." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error requesting supplier payout:", error);
+    res.status(500).json({ message: "حدث خطأ أثناء معالجة طلبك." });
+  } finally {
+    connection.release();
+  }
 });
 /**
  * @desc    Get all shipping companies for the logged-in supplier
@@ -816,7 +1115,7 @@ exports.getMyShippingCompanies = asyncHandler(async (req, res) => {
   const [companies] = await pool.query(
     // We use the 'merchant_id' column to store the user_id (supplier or merchant)
     "SELECT * FROM shipping_companies WHERE merchant_id = ? ORDER BY name ASC",
-    [supplierId]
+    [supplierId],
   );
   res.status(200).json(companies);
 });
@@ -838,7 +1137,7 @@ exports.addMyShippingCompany = asyncHandler(async (req, res) => {
 
   const [result] = await pool.query(
     "INSERT INTO shipping_companies (merchant_id, name, shipping_cost) VALUES (?, ?, ?)",
-    [supplierId, name, shipping_cost]
+    [supplierId, name, shipping_cost],
   );
   res.status(201).json({ id: result.insertId, name, shipping_cost });
 });
@@ -861,7 +1160,7 @@ exports.updateMyShippingCompany = asyncHandler(async (req, res) => {
 
   await pool.query(
     "UPDATE shipping_companies SET name = ?, shipping_cost = ? WHERE id = ? AND merchant_id = ?",
-    [name, shipping_cost, id, supplierId]
+    [name, shipping_cost, id, supplierId],
   );
 
   res.status(200).json({ message: "تم تحديث شركة الشحن بنجاح." });
@@ -878,7 +1177,7 @@ exports.deleteMyShippingCompany = asyncHandler(async (req, res) => {
 
   const [result] = await pool.query(
     "DELETE FROM shipping_companies WHERE id = ? AND merchant_id = ?",
-    [id, supplierId]
+    [id, supplierId],
   );
 
   if (result.affectedRows === 0) {
@@ -897,7 +1196,7 @@ exports.getSupplierSettings = asyncHandler(async (req, res) => {
   try {
     const [rows] = await pool.query(
       "SELECT store_name, store_description, store_banner_url, social_links, notifications_prefs, privacy_prefs FROM users WHERE id = ?",
-      [req.user.id]
+      [req.user.id],
     );
 
     if (rows.length === 0) {
@@ -953,7 +1252,7 @@ exports.updateSupplierSettings = asyncHandler(async (req, res) => {
         JSON.stringify(notifications || {}),
         JSON.stringify(privacy || {}),
         req.user.id,
-      ]
+      ],
     );
     res.status(200).json({ message: "تم تحديث الإعدادات بنجاح!" });
   } catch (error) {

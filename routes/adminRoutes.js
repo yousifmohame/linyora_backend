@@ -39,20 +39,28 @@ const {
   getSubscriptionPlans,
   createSubscriptionPlan,
   updateSubscriptionPlan,
-  getAllModelPayouts,
-  updateModelPayoutStatus,
+  // getAllModelPayouts,
+  // updateModelPayoutStatus,
   adminGetAllConversations,
   adminGetMessagesForConversation,
-  getModelPayoutDetails,
+  // getModelPayoutDetails,
   createSubAdmin,
   getSubAdmins,
   updateSubAdmin,
   updateOrderStatus,
+  getFinancialReports,
+  getUserFinancialStatement,
+  getPayoutRequestById,
+  processPayoutRequest,
+  manageTransaction,
 } = require("../controllers/adminController");
 
 const storyController = require("../controllers/storyController");
 const sectionController = require("../controllers/sectionController");
-const { getSetting, updateSetting } = require("../controllers/settingsController");
+const {
+  getSetting,
+  updateSetting,
+} = require("../controllers/settingsController");
 
 const {
   updateCategory,
@@ -87,7 +95,7 @@ const {
   getAllFlashSales,
   getAvailableProductsForFlashSale,
   updateFlashSale,
-  deleteFlashSale
+  deleteFlashSale,
 } = require("../controllers/flashSaleController");
 
 const {
@@ -102,220 +110,430 @@ const {
 // Protect all routes: User must be logged in & Role ID must be 1 (Admin)
 router.use(protect, restrictTo(1));
 
-
 // =================================================================
 // 🛠️ SUB-ADMIN MANAGEMENT
 // =================================================================
-router.post("/sub-admins", checkPermission("settings", "write"), createSubAdmin);
+router.post(
+  "/sub-admins",
+  checkPermission("settings", "write"),
+  createSubAdmin,
+);
 router.get("/sub-admins", checkPermission("settings", "read"), getSubAdmins);
-router.put("/sub-admins/:id", checkPermission("settings", "write"), updateSubAdmin);
-
+router.put(
+  "/sub-admins/:id",
+  checkPermission("settings", "write"),
+  updateSubAdmin,
+);
 
 // =================================================================
 // 👥 USER MANAGEMENT
 // =================================================================
-router.route("/users")
-  .get(checkPermission("users", "read"), getAllUsers);
+router.route("/users").get(checkPermission("users", "read"), getAllUsers);
 
-router.route("/users/:id")
+router
+  .route("/users/:id")
   .put(checkPermission("users", "write"), updateUser)
   .delete(checkPermission("users", "write"), deleteUser);
-
 
 // =================================================================
 // 📜 AGREEMENTS
 // =================================================================
-router.get("/agreements", checkPermission("agreements", "read"), getAllAgreements);
-router.put("/agreements/:id", checkPermission("agreements", "write"), updateAgreementStatus);
-
+router.get(
+  "/agreements",
+  checkPermission("agreements", "read"),
+  getAllAgreements,
+);
+router.put(
+  "/agreements/:id",
+  checkPermission("agreements", "write"),
+  updateAgreementStatus,
+);
 
 // =================================================================
 // 📊 STATS & ANALYTICS
 // =================================================================
 router.get("/stats", checkPermission("settings", "read"), getPlatformStats);
-router.get("/dashboard-analytics", checkPermission("settings", "read"), getDashboardAnalytics);
-
+router.get(
+  "/dashboard-analytics",
+  checkPermission("settings", "read"),
+  getDashboardAnalytics,
+);
 
 // =================================================================
 // ⚙️ SETTINGS
 // =================================================================
-router.route("/settings")
+router
+  .route("/settings")
   .get(checkPermission("settings", "read"), getSettings)
   .put(checkPermission("settings", "write"), updateSettings);
-
 
 // =================================================================
 // 🚚 SHIPPING
 // =================================================================
-router.route("/shipping")
+router
+  .route("/shipping")
   .get(checkPermission("shipping", "read"), getShippingCompanies)
   .post(checkPermission("shipping", "write"), addShippingCompany);
 
-router.put("/shipping/:id", checkPermission("shipping", "write"), updateShippingCompany);
+router.put(
+  "/shipping/:id",
+  checkPermission("shipping", "write"),
+  updateShippingCompany,
+);
 
-
+// أضف هذا المسار الجديد
+router.get(
+  "/financial-statement/:userId",
+  checkPermission("shipping", "read"),
+  getUserFinancialStatement,
+);
 // =================================================================
 // 💎 SUBSCRIPTIONS (USER & PLANS)
 // =================================================================
 // User Subscriptions
-router.get("/subscriptions", checkPermission("subscriptions", "read"), getAllSubscriptions);
-router.post("/subscriptions/:id/cancel", checkPermission("subscriptions", "write"), cancelUserSubscription);
-router.delete("/subscriptions/:id", checkPermission("subscriptions", "write"), deleteUserSubscription);
+router.get(
+  "/subscriptions",
+  checkPermission("subscriptions", "read"),
+  getAllSubscriptions,
+);
+router.post(
+  "/subscriptions/:id/cancel",
+  checkPermission("subscriptions", "write"),
+  cancelUserSubscription,
+);
+router.delete(
+  "/subscriptions/:id",
+  checkPermission("subscriptions", "write"),
+  deleteUserSubscription,
+);
 
 // Subscription Plans
-router.route("/subscription-plans")
+router
+  .route("/subscription-plans")
   .get(checkPermission("Manage-Subscriptions", "read"), getSubscriptionPlans)
-  .post(checkPermission("Manage-Subscriptions", "write"), createSubscriptionPlan);
+  .post(
+    checkPermission("Manage-Subscriptions", "write"),
+    createSubscriptionPlan,
+  );
 
-router.route("/subscription-plans/:id")
-  .put(checkPermission("Manage-Subscriptions", "write"), updateSubscriptionPlan);
-
+router
+  .route("/subscription-plans/:id")
+  .put(
+    checkPermission("Manage-Subscriptions", "write"),
+    updateSubscriptionPlan,
+  );
 
 // =================================================================
 // 📦 PRODUCTS
 // =================================================================
 router.get("/products", checkPermission("products", "read"), getAllProducts);
-router.put("/products/:id", checkPermission("products", "write"), updateProductStatusByAdmin);
-router.delete("/products/:id", checkPermission("products", "write"), deleteProductByAdmin);
-
+router.put(
+  "/products/:id",
+  checkPermission("products", "write"),
+  updateProductStatusByAdmin,
+);
+router.delete(
+  "/products/:id",
+  checkPermission("products", "write"),
+  deleteProductByAdmin,
+);
 
 // =================================================================
 // 🛒 ORDERS
 // =================================================================
 router.get("/orders", checkPermission("orders", "read"), getAllPlatformOrders);
 router.get("/orders/:id", checkPermission("orders", "read"), getOrderDetails);
-router.put("/orders/:id/status", checkPermission("orders", "write"), updateOrderStatus);
+router.put(
+  "/orders/:id/status",
+  checkPermission("orders", "write"),
+  updateOrderStatus,
+);
 
 // =================================================================
 // ✅ VERIFICATIONS
 // =================================================================
-router.get("/verifications", checkPermission("verification", "read"), getPendingVerifications);
-router.get("/verifications/:id", checkPermission("verification", "read"), getVerificationDetails);
-router.put("/verifications/:id", checkPermission("verification", "write"), reviewVerification);
-
+router.get(
+  "/verifications",
+  checkPermission("verification", "read"),
+  getPendingVerifications,
+);
+router.get(
+  "/verifications/:id",
+  checkPermission("verification", "read"),
+  getVerificationDetails,
+);
+router.put(
+  "/verifications/:id",
+  checkPermission("verification", "write"),
+  reviewVerification,
+);
 
 // =================================================================
 // 💰 PAYOUTS & FINANCE
 // =================================================================
 // General Payouts
-router.get("/payouts", checkPermission("payouts", "read"), getAllPayoutRequests);
-router.get("/payouts/:id", checkPermission("payouts", "read"), getPayoutRequestDetails);
-router.put("/payouts/:id", checkPermission("payouts", "write"), updatePayoutRequestStatus);
+router.get(
+  "/payouts",
+  protect,
+  checkPermission("payouts", "read"),
+  getAllPayoutRequests,
+); // جلب الكل
+router.get(
+  "/payouts/:id",
+  protect,
+  checkPermission("payouts", "read"),
+  getPayoutRequestDetails 
+);
+
+// 3. معالجة طلب السحب (قبول / رفض)
+router.put(
+  "/payouts/:id",
+  protect,
+  checkPermission("payouts", "read"),
+  updatePayoutRequestStatus 
+);
 
 // Model Payouts
-router.route("/model-payouts")
-  .get(checkPermission("model payouts", "read"), getAllModelPayouts);
+// router
+//   .route("/model-payouts")
+//   .get(checkPermission("model payouts", "read"), getAllModelPayouts);
 
-router.route("/model-payouts/:id")
-  .get(checkPermission("model payouts", "read"), getModelPayoutDetails)
-  .put(checkPermission("model payouts", "write"), updateModelPayoutStatus);
-
+// router
+//   .route("/model-payouts/:id")
+//   .get(checkPermission("model payouts", "read"), getModelPayoutDetails)
+//   .put(checkPermission("model payouts", "write"), updateModelPayoutStatus);
 
 // =================================================================
 // 📢 PROMOTIONS
 // =================================================================
-router.route("/promotion-tiers")
+router
+  .route("/promotion-tiers")
   .get(checkPermission("Promotions", "read"), getAllPromotionTiers)
   .post(checkPermission("Promotions", "write"), createPromotionTier);
 
-router.route("/promotion-tiers/:id")
+router
+  .route("/promotion-tiers/:id")
   .put(checkPermission("Promotions", "write"), updatePromotionTier);
 
-router.get("/promotion-requests", checkPermission("Promotions", "read"), getPromotionRequests);
-router.put("/promotion-requests/:id/approve", checkPermission("Promotions", "write"), approvePromotionRequest);
-
+router.get(
+  "/promotion-requests",
+  checkPermission("Promotions", "read"),
+  getPromotionRequests,
+);
+router.put(
+  "/promotion-requests/:id/approve",
+  checkPermission("Promotions", "write"),
+  approvePromotionRequest,
+);
 
 // =================================================================
 // 💬 MESSAGES
 // =================================================================
-router.get("/conversations", checkPermission("messages", "read"), adminGetAllConversations);
-router.get("/conversations/:conversationId", checkPermission("messages", "read"), adminGetMessagesForConversation);
-
+router.get(
+  "/conversations",
+  checkPermission("messages", "read"),
+  adminGetAllConversations,
+);
+router.get(
+  "/conversations/:conversationId",
+  checkPermission("messages", "read"),
+  adminGetMessagesForConversation,
+);
 
 // =================================================================
 // 📸 STORIES
 // =================================================================
 // My Stories Management
-router.post("/my-stories", upload.single("media"), checkPermission("stories", "write"), storyController.createStory);
-router.get("/my-stories", checkPermission("stories", "read"), storyController.getMyStories);
-router.delete("/my-stories/:id", checkPermission("stories", "write"), storyController.deleteStory);
-router.post("/my-stories/view", checkPermission("stories", "read"), storyController.markStorySeen);
+router.post(
+  "/my-stories",
+  upload.single("media"),
+  checkPermission("stories", "write"),
+  storyController.createStory,
+);
+router.get(
+  "/my-stories",
+  checkPermission("stories", "read"),
+  storyController.getMyStories,
+);
+router.delete(
+  "/my-stories/:id",
+  checkPermission("stories", "write"),
+  storyController.deleteStory,
+);
+router.post(
+  "/my-stories/view",
+  checkPermission("stories", "read"),
+  storyController.markStorySeen,
+);
 
 // Story Sections (Old Routes - Keeping for compatibility if needed, but consider merging with Sections below)
-router.get("/my-stories/sections", checkPermission("stories", "read"), storyController.getSections);
-router.post("/my-stories/sections", upload.single("cover_image"), checkPermission("stories", "write"), storyController.createSection);
-router.delete("/my-stories/sections/:id", checkPermission("stories", "write"), storyController.deleteSection);
-
+router.get(
+  "/my-stories/sections",
+  checkPermission("stories", "read"),
+  storyController.getSections,
+);
+router.post(
+  "/my-stories/sections",
+  upload.single("cover_image"),
+  checkPermission("stories", "write"),
+  storyController.createSection,
+);
+router.delete(
+  "/my-stories/sections/:id",
+  checkPermission("stories", "write"),
+  storyController.deleteSection,
+);
 
 // =================================================================
 // 🖼️ MAIN BANNERS
 // =================================================================
-router.route("/main-banners")
+router
+  .route("/main-banners")
   .get(checkPermission("main-banners", "read"), getAllBanners)
-  .post(checkPermission("main-banners", "write"), upload.single("image"), createBanner);
+  .post(
+    checkPermission("main-banners", "write"),
+    upload.single("image"),
+    createBanner,
+  );
 
-router.route("/main-banners/:id")
-  .put(checkPermission("main-banners", "write"), upload.single("image"), updateBanner)
+router
+  .route("/main-banners/:id")
+  .put(
+    checkPermission("main-banners", "write"),
+    upload.single("image"),
+    updateBanner,
+  )
   .delete(checkPermission("main-banners", "write"), deleteBanner);
-
 
 // =================================================================
 // 🥖 MARQUEE BAR
 // =================================================================
-router.route("/marquee")
+router
+  .route("/marquee")
   .get(checkPermission("marquee-bar", "read"), getMarqueeMessages)
   .post(checkPermission("marquee-bar", "write"), createMarqueeMessage);
 
-router.route("/marquee/:id")
+router
+  .route("/marquee/:id")
   .put(checkPermission("marquee-bar", "write"), updateMarqueeMessage)
   .delete(checkPermission("marquee-bar", "write"), deleteMarqueeMessage);
 
 // Marquee Specific Settings
-router.get("/marquee/settings/:key", checkPermission("marquee-bar", "read"), getSetting);
-router.put("/marquee/settings/:key", checkPermission("marquee-bar", "write"), updateSetting);
+router.get(
+  "/marquee/settings/:key",
+  checkPermission("marquee-bar", "read"),
+  getSetting,
+);
+router.put(
+  "/marquee/settings/:key",
+  checkPermission("marquee-bar", "write"),
+  updateSetting,
+);
 
+router.get(
+  "/financial-reports",
+  checkPermission("marquee-bar", "read"),
+  getFinancialReports,
+);
+
+// إجراءات التدخل في المعاملات (Hold, Release, Refund)
+router.put(
+  "/transactions/:id/action",
+  checkPermission("marquee-bar", "read"),
+  manageTransaction,
+);
 
 // =================================================================
 // 📂 CATEGORIES
 // =================================================================
-router.get('/categories', checkPermission("categories", "read"), getAllCategories);
-router.post('/categories', upload.single('image'), checkPermission("categories", "write"), createCategory);
-router.put('/categories/:id', upload.single('image'), checkPermission("categories", "write"), updateCategory);
-router.delete('/categories/:id', checkPermission("categories", "write"), deleteCategory);
-
+router.get(
+  "/categories",
+  checkPermission("categories", "read"),
+  getAllCategories,
+);
+router.post(
+  "/categories",
+  upload.single("image"),
+  checkPermission("categories", "write"),
+  createCategory,
+);
+router.put(
+  "/categories/:id",
+  upload.single("image"),
+  checkPermission("categories", "write"),
+  updateCategory,
+);
+router.delete(
+  "/categories/:id",
+  checkPermission("categories", "write"),
+  deleteCategory,
+);
 
 // =================================================================
 // 🧩 SECTIONS (Global Layout Sections)
 // =================================================================
-router.get('/sections/admin/all', checkPermission("sections", "read"), sectionController.getAllSectionsAdmin);
-router.post('/sections', checkPermission("sections", "write"), sectionController.createSection);
-router.put('/sections/:id', checkPermission("sections", "write"), sectionController.updateSection);
-router.delete('/sections/:id', checkPermission("sections", "write"), sectionController.deleteSection);
+router.get(
+  "/sections/admin/all",
+  checkPermission("sections", "read"),
+  sectionController.getAllSectionsAdmin,
+);
+router.post(
+  "/sections",
+  checkPermission("sections", "write"),
+  sectionController.createSection,
+);
+router.put(
+  "/sections/:id",
+  checkPermission("sections", "write"),
+  sectionController.updateSection,
+);
+router.delete(
+  "/sections/:id",
+  checkPermission("sections", "write"),
+  sectionController.deleteSection,
+);
 
-
-router.get('/flash-sales', checkPermission('settings', 'read'), getAllFlashSales);
-router.post('/flash-sale', checkPermission('settings', 'write'), createFlashSale);
-router.get('/flash-sale/products-available', checkPermission('settings', 'read'), getAvailableProductsForFlashSale);
-router.put('/flash-sale/:id', checkPermission('settings', 'write'), updateFlashSale);
-router.delete('/flash-sale/:id', checkPermission('settings', 'write'), deleteFlashSale);
+router.get(
+  "/flash-sales",
+  checkPermission("settings", "read"),
+  getAllFlashSales,
+);
+router.post(
+  "/flash-sale",
+  checkPermission("settings", "write"),
+  createFlashSale,
+);
+router.get(
+  "/flash-sale/products-available",
+  checkPermission("settings", "read"),
+  getAvailableProductsForFlashSale,
+);
+router.put(
+  "/flash-sale/:id",
+  checkPermission("settings", "write"),
+  updateFlashSale,
+);
+router.delete(
+  "/flash-sale/:id",
+  checkPermission("settings", "write"),
+  deleteFlashSale,
+);
 
 // =================================================================
 // 📝 CONTENT (Pages like About Us, Terms)
 // =================================================================
-router.route("/content")
-  .get(checkPermission("Content", "read"), getAllContent);
+router.route("/content").get(checkPermission("Content", "read"), getAllContent);
 
-router.route("/content/:key")
+router
+  .route("/content/:key")
   .get(checkPermission("Content", "read"), getContentByKey)
   .put(checkPermission("Content", "write"), updateContent);
-
 
 // =================================================================
 // 🌐 PUBLIC ROUTES (Exceptions that might be needed)
 // =================================================================
 // Note: Usually public routes should be in a separate file or before the router.use(protect)
 // But if you keep it here, ensure `protect` allows it or move it to marqueeRoutes.js
-router.get("/active", getActiveMarqueeMessages); 
-
+router.get("/active", getActiveMarqueeMessages);
 
 module.exports = router;

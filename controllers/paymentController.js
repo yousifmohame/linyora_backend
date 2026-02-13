@@ -1,19 +1,18 @@
+// backend/controllers/paymentController.js
+
 const asyncHandler = require("express-async-handler");
 const pool = require("../config/db");
 const sendEmail = require("../utils/emailService");
 const { getStripe } = require("../config/stripe");
 const { createOrderInternal } = require("../controllers/orderController");
+const { recordTransaction } = require("../controllers/walletController");
 
 // --- Helper Functions ---
 
-// وظيفة مساعدة للحصول على أو إنشاء عميل Stripe
 const getOrCreateCustomer = async (user) => {
   const stripe = getStripe();
-
-  // 1. إذا كان ID العميل موجوداً في كائن المستخدم
   if (user.stripe_customer_id) return user.stripe_customer_id;
 
-  // 2. التحقق من قاعدة البيانات
   const [[dbUser]] = await pool.query(
     "SELECT stripe_customer_id FROM users WHERE id = ?",
     [user.id],
@@ -22,14 +21,12 @@ const getOrCreateCustomer = async (user) => {
     return dbUser.stripe_customer_id;
   }
 
-  // 3. إنشاء عميل جديد في Stripe
   const customer = await stripe.customers.create({
     email: user.email,
     name: user.name,
     metadata: { userId: user.id },
   });
 
-  // 4. حفظ ID العميل في قاعدة البيانات
   await pool.query("UPDATE users SET stripe_customer_id = ? WHERE id = ?", [
     customer.id,
     user.id,
@@ -39,28 +36,42 @@ const getOrCreateCustomer = async (user) => {
 };
 
 // ==========================================
-// 🌐 WEB FLOWS (Stripe Checkout)
+// 🌐 WEB FLOWS
 // ==========================================
 
-/**
- * @desc    [Web] Create Subscription Session
- */
 const createSubscriptionSession = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { planId } = req.body;
   const { id: userId, email: userEmail } = req.user;
 
-  if (!planId) return res.status(400).json({ message: "معرف الباقة مطلوب." });
+  if (!planId) return res.status(400).json({ message: "Plan ID required" });
 
   const [[plan]] = await pool.query(
     "SELECT * FROM subscription_plans WHERE id = ? AND is_active = 1",
     [planId],
   );
+  if (!plan) return res.status(404).json({ message: "Plan not found" });
 
-  if (!plan)
-    return res
-      .status(404)
-      .json({ message: "الباقة المحددة غير متوفرة أو غير نشطة." });
+  // إلغاء الاشتراك القديم إن وجد
+  const [[activeSub]] = await pool.query(
+    "SELECT stripe_subscription_id FROM user_subscriptions WHERE user_id = ? AND status = 'active'",
+    [userId],
+  );
+
+  if (activeSub?.stripe_subscription_id) {
+    try {
+      console.log(
+        `🔄 Cancelling old subscription: ${activeSub.stripe_subscription_id}`,
+      );
+      await stripe.subscriptions.cancel(activeSub.stripe_subscription_id);
+      await pool.query(
+        "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
+        [activeSub.stripe_subscription_id],
+      );
+    } catch (e) {
+      console.error("Cancel Error:", e.message);
+    }
+  }
 
   const unitAmount = Math.round(parseFloat(plan.price) * 100);
 
@@ -73,45 +84,40 @@ const createSubscriptionSession = asyncHandler(async (req, res) => {
         {
           price_data: {
             currency: "sar",
-            product_data: {
-              name: plan.name,
-              description: plan.description || undefined,
-            },
+            product_data: { name: plan.name, description: plan.description },
             unit_amount: unitAmount,
             recurring: { interval: "month" },
           },
           quantity: 1,
         },
       ],
-      metadata: {
-        userId: userId,
-        planId: plan.id,
-        sessionType: "subscription",
+      // 🔥🔥🔥 هام جداً: الميتاداتا داخل subscription_data 🔥🔥🔥
+      subscription_data: {
+        metadata: {
+          userId: userId,
+          planId: plan.id,
+          sessionType: "subscription",
+        },
       },
-      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      metadata: { userId, planId: plan.id, sessionType: "subscription" }, // للجلسة فقط
+      success_url: `${process.env.FRONTEND_URL}/dashboard?subscription_success=true`,
       cancel_url: `${process.env.FRONTEND_URL}/dashboard/subscribe`,
     });
     res.status(200).json({ checkoutUrl: session.url });
   } catch (error) {
-    console.error("Subscription Session Error:", error);
-    res.status(500).json({ message: "فشل في إنشاء جلسة الدفع." });
+    console.error("Session Create Error:", error);
+    res.status(500).json({ message: "Failed to create session" });
   }
 });
 
-/**
- * @desc    [Web] Create Product Checkout Session
- */
 const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { cartItems, shippingAddressId, shipping_company_id, shipping_cost } =
     req.body;
   const { id: userId, email: userEmail } = req.user;
 
-  if (!cartItems || cartItems.length === 0 || !shippingAddressId) {
-    return res.status(400).json({
-      message: "البيانات غير كاملة: السلة فارغة أو لم يتم تحديد عنوان الشحن.",
-    });
-  }
+  if (!cartItems || !shippingAddressId)
+    return res.status(400).json({ message: "بيانات ناقصة." });
 
   try {
     const line_items = [];
@@ -122,25 +128,20 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
         "SELECT id, price, product_id FROM product_variants WHERE id = ?",
         [item.id],
       );
-
-      if (!variant)
-        throw new Error(`المنتج أو الخيار رقم ${item.id} غير موجود.`);
-
+      if (!variant) throw new Error(`Product ${item.id} not found.`);
       const [[product]] = await pool.query(
         "SELECT name FROM products WHERE id = ?",
         [variant.product_id],
       );
-      const productName = product ? product.name : "منتج";
-      const realUnitAmount = Math.round(Number(variant.price) * 100);
 
       line_items.push({
         price_data: {
           currency: "sar",
           product_data: {
-            name: `${productName} (${item.name || "خيار"})`,
+            name: `${product.name} (${item.name})`,
             images: item.image ? [item.image] : [],
           },
-          unit_amount: realUnitAmount,
+          unit_amount: Math.round(Number(variant.price) * 100),
         },
         quantity: item.quantity,
       });
@@ -176,10 +177,10 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
         shipping_company_id: shipping_company_id || null,
         shipping_cost: shipping_cost || "0",
         cartItems: JSON.stringify(
-          verifiedCartItems.map((item) => ({
-            id: item.id,
-            productId: item.productId,
-            quantity: item.quantity,
+          verifiedCartItems.map((i) => ({
+            id: i.id,
+            productId: i.productId,
+            quantity: i.quantity,
           })),
         ),
       },
@@ -189,48 +190,34 @@ const createCheckoutSessionForProducts = asyncHandler(async (req, res) => {
 
     res.status(200).json({ checkoutUrl: session.url });
   } catch (error) {
-    console.error("Product Session Error:", error);
-    res
-      .status(500)
-      .json({ message: error.message || "فشل في إنشاء جلسة الدفع." });
+    res.status(500).json({ message: error.message });
   }
 });
 
-/**
- * @desc    [Web] Create Agreement Checkout Session
- */
 const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { package_tier_id, product_id, model_id } = req.body;
   const merchant_id = req.user.id;
 
-  if (!package_tier_id || !product_id || !model_id) {
-    return res.status(400).json({ message: "Missing required fields." });
-  }
-
   try {
     const [[tier]] = await pool.query(
-      `SELECT pt.price, sp.title as package_title 
-       FROM package_tiers pt
-       JOIN service_packages sp ON pt.package_id = sp.id
-       WHERE pt.id = ?`,
+      `SELECT pt.price, sp.title FROM package_tiers pt JOIN service_packages sp ON pt.package_id = sp.id WHERE pt.id = ?`,
       [package_tier_id],
     );
-
     if (!tier)
       return res.status(404).json({ message: "Package tier not found." });
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
       mode: "payment",
-      payment_intent_data: { capture_method: "manual" },
+      payment_intent_data: { capture_method: "manual" }, // حجز المبلغ فقط
       line_items: [
         {
           price_data: {
             currency: "sar",
             product_data: {
-              name: `طلب تعاون: ${tier.package_title}`,
-              description: `تفويض مبلغ لباقة خدمة من العارضة`,
+              name: `تعاون: ${tier.title}`,
+              description: "تفويض مبلغ للخدمة",
             },
             unit_amount: Math.round(parseFloat(tier.price) * 100),
           },
@@ -250,29 +237,22 @@ const createAgreementCheckoutSession = asyncHandler(async (req, res) => {
 
     res.json({ url: session.url });
   } catch (error) {
-    console.error("Agreement Session Error:", error);
-    res.status(500).json({ message: "Failed to create checkout session." });
+    res.status(500).json({ message: "Failed to create session." });
   }
 });
 
 // ==========================================
-// 📱 MOBILE FLOWS (PaymentIntent / SetupIntent)
+// 📱 MOBILE FLOWS
 // ==========================================
 
-/**
- * @desc    [Mobile] Create PaymentIntent for Products
- */
 const createMobilePaymentIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { cartItems, shippingAddressId, shipping_company_id, shipping_cost } =
     req.body;
-  const { id: userId, email: userEmail } = req.user;
+  const { id: userId } = req.user;
 
-  if (!cartItems || cartItems.length === 0 || !shippingAddressId) {
-    return res
-      .status(400)
-      .json({ message: "البيانات غير كاملة: السلة فارغة أو العنوان ناقص." });
-  }
+  if (!cartItems || !shippingAddressId)
+    return res.status(400).json({ message: "Data incomplete." });
 
   try {
     let totalAmount = 0;
@@ -283,27 +263,20 @@ const createMobilePaymentIntent = asyncHandler(async (req, res) => {
         "SELECT id, price, product_id FROM product_variants WHERE id = ?",
         [item.id],
       );
-
-      if (!variant) throw new Error(`Product variant ${item.id} not found.`);
-
-      const realPrice = Number(variant.price);
-      totalAmount += realPrice * item.quantity;
-
+      if (!variant) throw new Error(`Variant ${item.id} not found.`);
+      totalAmount += Number(variant.price) * item.quantity;
       verifiedCartItems.push({
         id: variant.id,
         productId: variant.product_id,
-        price: variant.price,
         quantity: item.quantity,
       });
     }
 
     if (Number(shipping_cost) > 0) totalAmount += Number(shipping_cost);
 
-    const amountInCents = Math.round(totalAmount * 100);
     const customerId = await getOrCreateCustomer(req.user);
-
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
+      amount: Math.round(totalAmount * 100),
       currency: "sar",
       customer: customerId,
       automatic_payment_methods: { enabled: true },
@@ -315,13 +288,7 @@ const createMobilePaymentIntent = asyncHandler(async (req, res) => {
           ? shipping_company_id.toString()
           : "",
         shipping_cost: shipping_cost ? shipping_cost.toString() : "0",
-        cartItems: JSON.stringify(
-          verifiedCartItems.map((item) => ({
-            id: item.id,
-            productId: item.productId,
-            quantity: item.quantity,
-          })),
-        ),
+        cartItems: JSON.stringify(verifiedCartItems),
         source: "mobile_app",
       },
     });
@@ -332,34 +299,20 @@ const createMobilePaymentIntent = asyncHandler(async (req, res) => {
       publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
     });
   } catch (error) {
-    console.error("Mobile PaymentIntent Error:", error);
-    res
-      .status(500)
-      .json({ message: error.message || "Failed to create payment." });
+    res.status(500).json({ message: error.message });
   }
 });
 
-/**
- * @desc    [Mobile] Create SetupIntent (Step 1 for Subscription)
- */
 const createMobileSetupIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const customerId = await getOrCreateCustomer(req.user);
-
   const setupIntent = await stripe.setupIntents.create({
     customer: customerId,
     payment_method_types: ["card"],
   });
-
-  res.json({
-    clientSecret: setupIntent.client_secret,
-    customerId: customerId,
-  });
+  res.json({ clientSecret: setupIntent.client_secret, customerId });
 });
 
-/**
- * @desc    [Mobile] Create Subscription (Step 2 after Setup)
- */
 const createMobileSubscription = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const { planId, paymentMethodId } = req.body;
@@ -368,59 +321,46 @@ const createMobileSubscription = asyncHandler(async (req, res) => {
   try {
     const [[plan]] = await pool.query(
       "SELECT * FROM subscription_plans WHERE id = ? AND is_active = 1",
-      [planId]
+      [planId],
     );
-    if (!plan) return res.status(404).json({ message: "الباقة غير موجودة." });
+    if (!plan) return res.status(404).json({ message: "Plan not found." });
 
     const customerId = await getOrCreateCustomer(req.user);
-    
-    // متغير لتخزين ID البطاقة المستخدمة
+
     let usedPaymentMethodId = paymentMethodId;
 
-    // 2. معالجة البطاقة وتعيين الافتراضية
     if (paymentMethodId) {
       try {
         await stripe.paymentMethods.attach(paymentMethodId, {
           customer: customerId,
         });
-      } catch (error) {
-        if (error.code !== 'resource_already_exists') throw error;
-      }
-      
+      } catch (e) {}
       await stripe.customers.update(customerId, {
         invoice_settings: { default_payment_method: paymentMethodId },
       });
-
     } else {
-      // البحث عن البطاقة الافتراضية أو أحدث بطاقة
       const customer = await stripe.customers.retrieve(customerId);
-      
       if (customer.invoice_settings.default_payment_method) {
-         usedPaymentMethodId = customer.invoice_settings.default_payment_method;
+        usedPaymentMethodId = customer.invoice_settings.default_payment_method;
       } else {
         const paymentMethods = await stripe.paymentMethods.list({
           customer: customerId,
-          type: 'card',
+          type: "card",
           limit: 1,
         });
-
         if (paymentMethods.data.length > 0) {
           usedPaymentMethodId = paymentMethods.data[0].id;
           await stripe.customers.update(customerId, {
             invoice_settings: { default_payment_method: usedPaymentMethodId },
           });
         } else {
-          return res.status(400).json({ 
-            message: "لا توجد وسيلة دفع محفوظة. يرجى إضافة بطاقة أولاً." 
-          });
+          return res.status(400).json({ message: "No payment method found." });
         }
       }
     }
 
-    // 3. إنشاء الاشتراك
-    const unitAmount = Math.round(parseFloat(plan.price) * 100);
     const price = await stripe.prices.create({
-      unit_amount: unitAmount,
+      unit_amount: Math.round(parseFloat(plan.price) * 100),
       currency: "sar",
       recurring: { interval: "month" },
       product_data: { name: plan.name },
@@ -430,106 +370,72 @@ const createMobileSubscription = asyncHandler(async (req, res) => {
       customer: customerId,
       items: [{ price: price.id }],
       metadata: {
-        userId: userId,
+        userId,
         planId: plan.id,
         sessionType: "subscription",
         source: "mobile_app",
       },
-      payment_behavior: 'default_incomplete',
-      payment_settings: {
-        save_default_payment_method: "on_subscription",
-      },
+      payment_behavior: "default_incomplete",
+      payment_settings: { save_default_payment_method: "on_subscription" },
       expand: ["latest_invoice.payment_intent"],
     });
 
-    const invoice = subscription.latest_invoice;
-    const paymentIntent = invoice.payment_intent;
-
     res.status(200).json({
       subscriptionId: subscription.id,
-      clientSecret: paymentIntent ? paymentIntent.client_secret : null,
+      clientSecret: subscription.latest_invoice.payment_intent?.client_secret,
       status: subscription.status,
-      // ✅ نضيف هذا السطر لإرجاع ID البطاقة للتطبيق
-      paymentMethodId: usedPaymentMethodId, 
+      paymentMethodId: usedPaymentMethodId,
     });
-
   } catch (error) {
-    console.error("Mobile Subscription Error:", error);
-    res.status(500).json({ 
-        message: error.raw ? error.raw.message : "فشل في إنشاء الاشتراك." 
-    });
+    res.status(500).json({ message: error.message });
   }
 });
 
-/**
- * @desc    [Mobile] Create Agreement PaymentIntent (Supports both Offers and Packages)
- * @route   POST /api/payments/mobile/create-agreement-intent
- * @access  Private (Merchant)
- */
 const createMobileAgreementIntent = asyncHandler(async (req, res) => {
   const stripe = getStripe();
-  // نستقبل إما عرض خاص (offer_id) أو باقة (package_tier_id)
   const { offer_id, package_tier_id, product_id, model_id } = req.body;
   const merchant_id = req.user.id;
 
-  // التحقق من البيانات الأساسية
-  if (!product_id || !model_id) {
-     return res.status(400).json({ message: "Product ID and Model ID are required." });
-  }
-  
-  // يجب توفر أحدهما على الأقل
-  if (!offer_id && !package_tier_id) {
-    return res.status(400).json({ message: "Either Offer ID or Package Tier ID is required." });
+  if ((!offer_id && !package_tier_id) || !product_id || !model_id) {
+    return res.status(400).json({ message: "Missing required fields." });
   }
 
   try {
     let amountInCents = 0;
     let description = "";
 
-    // 1. حساب السعر بناءً على نوع الاتفاق
     if (offer_id) {
-        // --- حالة العرض الخاص ---
-        const [[offer]] = await pool.query(
-            "SELECT price FROM offers WHERE id = ?", 
-            [offer_id]
-        );
-        if (!offer) return res.status(404).json({ message: "Offer not found." });
-        
-        amountInCents = Math.round(parseFloat(offer.price) * 100);
-        description = `Agreement for Offer #${offer_id}`;
-    } 
-    else if (package_tier_id) {
-        // --- حالة الباقة ---
-        const [[tier]] = await pool.query(
-            "SELECT price FROM package_tiers WHERE id = ?", 
-            [package_tier_id]
-        );
-        if (!tier) return res.status(404).json({ message: "Package Tier not found." });
-
-        amountInCents = Math.round(parseFloat(tier.price) * 100);
-        description = `Agreement for Package Tier #${package_tier_id}`;
+      const [[offer]] = await pool.query(
+        "SELECT price FROM offers WHERE id = ?",
+        [offer_id],
+      );
+      amountInCents = Math.round(parseFloat(offer.price) * 100);
+      description = `Agreement Offer #${offer_id}`;
+    } else {
+      const [[tier]] = await pool.query(
+        "SELECT price FROM package_tiers WHERE id = ?",
+        [package_tier_id],
+      );
+      amountInCents = Math.round(parseFloat(tier.price) * 100);
+      description = `Agreement Package #${package_tier_id}`;
     }
 
     const customerId = await getOrCreateCustomer(req.user);
-
-    // 2. إنشاء نية الدفع في Stripe (مع الميتاداتا الناقصة)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "sar",
       customer: customerId,
-      capture_method: "automatic", // حجز المبلغ
+      capture_method: "automatic",
       automatic_payment_methods: { enabled: true },
-      description: description,
-      // ✅✅✅ هذا هو الجزء الذي كان ينقصك!
+      description,
       metadata: {
-        sessionType: "agreement_authorization", // مفتاح الويب هوك
-        merchant_id: merchant_id,
-        model_id: model_id,
-        product_id: product_id,
-        // نرسل القيم أو null كنص ليقبلها Stripe
-        offer_id: offer_id ? offer_id : null,
-        package_tier_id: package_tier_id ? package_tier_id : null,
-        source: "mobile_app"
+        sessionType: "agreement_authorization",
+        merchant_id,
+        model_id,
+        product_id,
+        offer_id: offer_id || null,
+        package_tier_id: package_tier_id || null,
+        source: "mobile_app",
       },
     });
 
@@ -537,15 +443,349 @@ const createMobileAgreementIntent = asyncHandler(async (req, res) => {
       clientSecret: paymentIntent.client_secret,
       customer: customerId,
     });
-
   } catch (error) {
-    console.error("Error creating agreement intent:", error);
-    res.status(500).json({ message: "Failed to create payment intent." });
+    res.status(500).json({ message: "Failed to create intent." });
+  }
+});
+
+const createMobilePromotionIntent = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const { product_id, tier_id } = req.body;
+  const merchant_id = req.user.id;
+
+  try {
+    const [[tier]] = await pool.query(
+      "SELECT * FROM promotion_tiers WHERE id = ?",
+      [tier_id],
+    );
+    if (!tier) return res.status(404).json({ message: "Tier not found." });
+
+    const amountInCents = Math.round(parseFloat(tier.price) * 100);
+    const customerId = await getOrCreateCustomer(req.user);
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "sar",
+      customer: customerId,
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        sessionType: "product_promotion",
+        merchantId: merchant_id,
+        productId: product_id,
+        tierId: tier_id,
+        source: "mobile_app",
+      },
+    });
+
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      customer: customerId,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to create promotion payment." });
   }
 });
 
 // ==========================================
-// 🛠 SHARED UTILITIES (Cards, Cancellation)
+// 🔗 WEBHOOK HANDLER (مع تسجيل المعاملات المالية)
+// ==========================================
+
+const handlePaymentWebhook = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const sig = req.headers["stripe-signature"];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // 1. معالجة دفع الاشتراكات
+  if (event.type === "invoice.payment_succeeded") {
+    const invoice = event.data.object;
+
+    if (invoice.subscription) {
+      try {
+        const subscription = await stripe.subscriptions.retrieve(
+          invoice.subscription,
+        );
+        const { userId, planId } = subscription.metadata;
+
+        if (userId && planId) {
+          const startDate = new Date(subscription.current_period_start * 1000);
+          const endDate = new Date(subscription.current_period_end * 1000);
+          const amountPaid = invoice.amount_paid / 100;
+
+          const connection = await pool.getConnection();
+          try {
+            // 1. إدراج/تحديث الاشتراك الجديد ليصبح ACTIVE
+            await connection.query(
+              `INSERT INTO user_subscriptions 
+                    (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
+                   VALUES (?, 'active', ?, ?, ?, ?)
+                   ON DUPLICATE KEY UPDATE
+                      status = 'active', start_date = VALUES(start_date), end_date = VALUES(end_date), stripe_subscription_id = VALUES(stripe_subscription_id), plan_id = VALUES(plan_id)`,
+              [userId, startDate, endDate, subscription.id, planId],
+            );
+
+            // 🔥🔥 2. خطوة التنظيف (الإضافة الجديدة) 🔥🔥
+            // نقوم بإلغاء أي اشتراك آخر لهذا المستخدم في قاعدة البيانات ما عدا الاشتراك الحالي
+            // هذا يضمن وجود اشتراك واحد نشط فقط في الداتابيس
+            await connection.query(
+              "UPDATE user_subscriptions SET status = 'cancelled' WHERE user_id = ? AND stripe_subscription_id != ? AND status = 'active'",
+              [userId, subscription.id],
+            );
+            console.log(`🧹 Cleaned up old subscriptions for User ${userId}`);
+
+            // 3. تسجيل المعاملة المالية
+            await recordTransaction(
+              {
+                userId: userId,
+                amount: -amountPaid,
+                type: "subscription_payment",
+                status: "cleared",
+                paymentMethod: "card",
+                referenceType: "subscription",
+                referenceId: subscription.id,
+                description: `دفع رسوم اشتراك باقة #${planId}`,
+                availableAt: null,
+              },
+              connection,
+            );
+          } catch (dbErr) {
+            console.error("❌ Database Error during subscription:", dbErr);
+          } finally {
+            connection.release();
+          }
+        } else {
+          console.warn("⚠️ Subscription Metadata is missing userId or planId.");
+        }
+      } catch (err) {
+        console.error("❌ Webhook Subscription Logic Error:", err);
+      }
+    }
+    return res.status(200).send();
+  }
+
+  // 2. معالجة المدفوعات المباشرة (Intent)
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+    console.log(
+      "💰 PaymentIntent Succeeded. Metadata:",
+      paymentIntent.metadata,
+    );
+
+    if (!paymentIntent.invoice && paymentIntent.metadata?.sessionType) {
+      await processSuccessfulPayment(paymentIntent, stripe, "payment_intent");
+    } else {
+      console.log("⚠️ Skipped PaymentIntent: No sessionType or is invoice.");
+    }
+  }
+
+  // 3. معالجة Web Checkout
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    if (session.mode !== "subscription") {
+      await processSuccessfulPayment(session, stripe, "checkout_session");
+    }
+  }
+
+  // 4. إلغاء الاشتراك
+  if (event.type === "customer.subscription.deleted") {
+    const subscription = event.data.object;
+    await pool.query(
+      "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
+      [subscription.id],
+    );
+  }
+
+  res.status(200).send();
+});
+
+// --- الدالة الموحدة لمعالجة الدفع وتسجيل الأموال ---
+async function processSuccessfulPayment(dataObject, stripe, sourceType) {
+  const { sessionType } = dataObject.metadata;
+  console.log(`🚀 Starting processSuccessfulPayment for: ${sessionType}`);
+  console.log("📋 Metadata Received:", dataObject.metadata);
+
+  const connection = await pool.getConnection();
+
+  // تحديد المبلغ المدفوع (Stripe يرسل المبلغ بأصغر وحدة، نحوله للعملة الأساسية)
+  const amountPaid = (dataObject.amount || dataObject.amount_total) / 100;
+
+  try {
+    await connection.beginTransaction();
+
+    // 🅰️ ترويج المنتجات (Promotion)
+    if (sessionType === "product_promotion") {
+      const { productId, tierId, merchantId } = dataObject.metadata;
+      const paymentId =
+        sourceType === "payment_intent"
+          ? dataObject.id
+          : dataObject.payment_intent;
+
+      const [[tier]] = await connection.query(
+        "SELECT duration_days, price FROM promotion_tiers WHERE id = ?",
+        [tierId],
+      );
+      if (tier) {
+        await connection.query(
+          `INSERT INTO product_promotions (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) 
+                 VALUES (?, ?, ?, 'active', ?, NOW(), DATE_ADD(NOW(), INTERVAL ? DAY))`,
+          [productId, merchantId, tierId, paymentId, tier.duration_days],
+        );
+
+        // 🔥 تسجيل مالي: خصم رسوم الترويج من التاجر
+        await recordTransaction(
+          {
+            userId: merchantId,
+            amount: -amountPaid, // خصم
+            type: "promotion_fee",
+            status: "cleared", // مدفوع بالبطاقة
+            paymentMethod: "card",
+            referenceType: "product_promotion",
+            referenceId: productId,
+            description: `رسوم ترويج منتج #${productId}`,
+            availableAt: null,
+          },
+          connection,
+        );
+      }
+    }
+
+    // 🅱️ شراء المنتجات (Orders)
+    else if (sessionType === "product_purchase") {
+      const orderPayload = {
+        customerId: Number(dataObject.metadata.userId),
+        cartItems: JSON.parse(dataObject.metadata.cartItems),
+        shippingAddressId: Number(dataObject.metadata.shippingAddressId),
+        shipping_company_id: Number(dataObject.metadata.shipping_company_id),
+        shipping_cost: Number(dataObject.metadata.shipping_cost),
+        paymentMethod: "card",
+        paymentStatus: "paid",
+        stripe_session_id: dataObject.id,
+      };
+      // ⚠️ ملاحظة: createOrderInternal تستدعي calculateAndRegisterEarnings داخلياً،
+      await createOrderInternal(orderPayload, connection);
+    }
+
+    // 🆎 الاتفاقيات (Agreements)
+    else if (sessionType === "agreement_authorization") {
+      console.log("🤝 Agreement Authorization flow detected.");
+
+      const { merchant_id, model_id, product_id, package_tier_id, offer_id } =
+        dataObject.metadata;
+      const paymentId =
+        sourceType === "payment_intent"
+          ? dataObject.id
+          : dataObject.payment_intent;
+
+      const safePackageId =
+        package_tier_id && package_tier_id !== "null" ? package_tier_id : null;
+      const safeOfferId = offer_id && offer_id !== "null" ? offer_id : null;
+
+      console.log("📝 Inserting Agreement into DB...", {
+        merchant_id,
+        model_id,
+        safePackageId,
+        safeOfferId,
+      });
+
+      // 1. إنشاء سجل الاتفاقية
+      const [agreeResult] = await connection.query(
+        `INSERT INTO agreements (merchant_id, model_id, package_tier_id, offer_id, product_id, status, stripe_payment_intent_id, created_at) 
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
+        [
+          merchant_id,
+          model_id,
+          safePackageId,
+          safeOfferId,
+          product_id,
+          paymentId,
+        ],
+      );
+
+      console.log("✅ Agreement Inserted ID:", agreeResult.insertId);
+
+      // 2. 🔥 النظام المالي للاتفاقيات:
+      // جلب نسبة العمولة للاتفاقيات
+      const [[settings]] = await connection.query(
+        "SELECT setting_value FROM platform_settings WHERE setting_key = 'commission_rate'",
+      );
+      const commissionRate = (Number(settings?.setting_value) || 10) / 100;
+
+      const platformFee = amountPaid * commissionRate; // عمولة المنصة
+
+      console.log(
+        `💰 Financials: Amount=${amountPaid}, Fee=${platformFee}, ModelNet=${amountPaid - platformFee}`,
+      );
+
+      // أ) تسجيل إيراد للمودل (معلق حتى انتهاء العمل)
+      // نسجل المبلغ كاملاً، ثم نخصم العمولة
+      await recordTransaction(
+        {
+          userId: model_id,
+          amount: amountPaid,
+          type: "agreement_income",
+          status: "pending", // معلق حتى اكتمال الاتفاقية
+          paymentMethod: "system", // النظام هو من يدفع للمودل (المال محجوز لدينا)
+          referenceType: "agreement",
+          referenceId: agreeResult.insertId,
+          description: `إيراد اتفاقية جديد #${agreeResult.insertId}`,
+          availableAt: null, // يتحدد عند الانتهاء
+        },
+        connection,
+      );
+
+      // ب) تسجيل خصم عمولة المنصة من المودل
+      await recordTransaction(
+        {
+          userId: model_id,
+          amount: -platformFee,
+          type: "agreement_fee",
+          status: "pending",
+          paymentMethod: "system",
+          referenceType: "agreement",
+          referenceId: agreeResult.insertId,
+          description: `خصم عمولة منصة عن اتفاقية #${agreeResult.insertId}`,
+          availableAt: null,
+        },
+        connection,
+      );
+
+      // ج) تسجيل الدفع على التاجر (لأغراض الكشف فقط)
+      await recordTransaction(
+        {
+          userId: merchant_id,
+          amount: -amountPaid,
+          type: "agreement_payment",
+          status: "cleared", // تم الخصم من بطاقته فوراً
+          paymentMethod: "card",
+          referenceType: "agreement",
+          referenceId: agreeResult.insertId,
+          description: `دفع تكلفة اتفاقية #${agreeResult.insertId}`,
+          availableAt: null,
+        },
+        connection,
+      );
+    } else {
+      console.log("⚠️ Unknown sessionType:", sessionType);
+    }
+
+    await connection.commit();
+    console.log("🎉 Transaction Committed Successfully.");
+  } catch (error) {
+    await connection.rollback();
+    console.error(`❌ Transaction Error (${sessionType}):`, error);
+  } finally {
+    connection.release();
+  }
+}
+
+// ==========================================
+// 🛠 SHARED UTILITIES
 // ==========================================
 
 const getPaymentMethods = asyncHandler(async (req, res) => {
@@ -717,273 +957,6 @@ const createAgreementPaymentIntent = async (req, res) => {
     res.status(500).json({ message: "Failed to create payment intent." });
   }
 };
-
-/**
- * @desc    Creates PaymentIntent for Product Promotion (Mobile Native)
- * @route   POST /api/payments/mobile/create-promotion-intent
- * @access  Private (Merchant)
- */
-const createMobilePromotionIntent = asyncHandler(async (req, res) => {
-  const stripe = getStripe();
-  
-  // استقبال البيانات كما يرسلها التطبيق (snake_case أو camelCase حسب الاتفاق)
-  // في كود Flutter الذي اعتمدناه، نحن نرسل: product_id و tier_id
-  const { product_id, tier_id } = req.body;
-  const merchant_id = req.user.id;
-
-  if (!product_id || !tier_id) {
-    return res.status(400).json({ message: "Product ID and Tier ID are required." });
-  }
-
-  try {
-    // 1. التحقق من الباقة والسعر
-    const [[tier]] = await pool.query(
-      "SELECT * FROM promotion_tiers WHERE id = ? AND is_active = 1",
-      [tier_id]
-    );
-
-    if (!tier) {
-      return res.status(404).json({ message: "Promotion tier not found." });
-    }
-
-    // 2. التحقق من أن المنتج يخص التاجر (خطوة أمان مهمة)
-    const [[product]] = await pool.query(
-      "SELECT id FROM products WHERE id = ? AND merchant_id = ?",
-      [product_id, merchant_id]
-    );
-
-    if (!product) {
-        return res.status(404).json({ message: "Product not found or does not belong to you." });
-    }
-
-    // 3. تجهيز العميل والمبلغ
-    const amountInCents = Math.round(parseFloat(tier.price) * 100);
-    const customerId = await getOrCreateCustomer(req.user);
-
-    // 4. إنشاء PaymentIntent
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "sar",
-      customer: customerId,
-      automatic_payment_methods: { enabled: true },
-      // ✅ الميتاداتا هنا هي السحر الذي يجعل الـ Webhook يعمل تلقائياً
-      metadata: {
-        sessionType: "product_promotion", // نفس النوع الذي ينتظره الـ Webhook
-        merchantId: merchant_id,
-        productId: product_id,
-        tierId: tier_id,
-        source: "mobile_app",
-      },
-    });
-
-    // 5. إرجاع المفتاح للتطبيق
-    res.json({
-      clientSecret: paymentIntent.client_secret,
-      customer: customerId,
-    });
-
-  } catch (error) {
-    console.error("Mobile Promotion Error:", error);
-    res.status(500).json({ message: "Failed to create promotion payment." });
-  }
-});
-// ==========================================
-// 🔗 WEBHOOK HANDLER (Corrected Logic)
-// ==========================================
-
-const handlePaymentWebhook = asyncHandler(async (req, res) => {
-  const stripe = getStripe();
-  const sig = req.headers["stripe-signature"];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  let event;
-
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  console.log(`🔔 Webhook received: ${event.type}`);
-
-  // -----------------------------------------------------------
-  // 1️⃣ السيناريو الأول: الاشتراكات (Web & Mobile)
-  // نعتمد حصرياً على الفاتورة لضمان وجود بيانات الاشتراك وتاريخ التجديد
-  // -----------------------------------------------------------
-  if (event.type === "invoice.payment_succeeded") {
-    const invoice = event.data.object;
-    
-    if (invoice.subscription) {
-      console.log(`🔄 Subscription Invoice Paid: ${invoice.subscription}`);
-
-      try {
-        // جلب تفاصيل الاشتراك للحصول على التواريخ والميتاداتا
-        const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-        const { userId, planId } = subscription.metadata;
-
-        if (userId && planId) {
-            const startDate = new Date(subscription.current_period_start * 1000);
-            const endDate = new Date(subscription.current_period_end * 1000);
-
-            const connection = await pool.getConnection();
-            try {
-                await connection.query(
-                  `INSERT INTO user_subscriptions 
-                    (user_id, status, start_date, end_date, stripe_subscription_id, plan_id)
-                   VALUES (?, 'active', ?, ?, ?, ?)
-                   ON DUPLICATE KEY UPDATE
-                      status = 'active',
-                      start_date = VALUES(start_date),
-                      end_date = VALUES(end_date),
-                      stripe_subscription_id = VALUES(stripe_subscription_id),
-                      plan_id = VALUES(plan_id)`,
-                  [userId, startDate, endDate, subscription.id, planId]
-                );
-                console.log(`✅ Subscription Database Updated for User: ${userId}`);
-            } finally {
-                connection.release();
-            }
-        }
-      } catch (err) {
-        console.error("❌ Error syncing subscription to DB:", err.message);
-      }
-    }
-    // نتوقف هنا ولا نتابع للكود بالأسفل
-    return res.status(200).send();
-  }
-
-  // -----------------------------------------------------------
-  // 2️⃣ السيناريو الثاني: الدفع لمرة واحدة (منتجات، ترويج، اتفاقيات)
-  // -----------------------------------------------------------
-  if (event.type === "payment_intent.succeeded") {
-    const paymentIntent = event.data.object;
-
-    // 🔥 تصحيح هام: إذا كان الدفع تابعاً لفاتورة (اشتراك)، نتجاهله هنا
-    // لأننا عالجناه في الخطوة 1 أعلاه.
-    if (paymentIntent.invoice) {
-        return res.status(200).send();
-    }
-
-    if (paymentIntent.metadata && paymentIntent.metadata.sessionType) {
-      await processSuccessfulPayment(paymentIntent, stripe, "payment_intent");
-    }
-  }
-
-  // -----------------------------------------------------------
-  // 3️⃣ السيناريو الثالث: Web Checkout (للمنتجات والترويج عبر الويب)
-  // -----------------------------------------------------------
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    
-    // إذا كان Session لاشتراك، نتجاهله لأن invoice.payment_succeeded سيعالجه
-    if (session.mode === 'subscription') {
-        return res.status(200).send();
-    }
-
-    await processSuccessfulPayment(session, stripe, "checkout_session");
-  }
-
-  // 4. إلغاء الاشتراك
-  if (event.type === "customer.subscription.deleted") {
-    const subscription = event.data.object;
-    try {
-      await pool.query(
-        "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
-        [subscription.id]
-      );
-      console.log(`❌ Subscription Cancelled: ${subscription.id}`);
-    } catch (dbError) {
-      console.error("DB Error on cancellation:", dbError);
-    }
-  }
-
-  res.status(200).send();
-});
-
-// --- دالة موحدة لمعالجة الدفع الناجح (Web & Mobile) ---
-async function processSuccessfulPayment(dataObject, stripe, sourceType) {
-  const { sessionType } = dataObject.metadata;
-  console.log(`✅ Processing Payment (${sourceType}): ${sessionType}`);
-
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
-
-    if (sessionType === "product_promotion") {
-        const { productId, tierId, merchantId } = dataObject.metadata;
-        // نستخدم id من الكائن حسب المصدر (payment_intent id أو checkout id)
-        const paymentIntentId = sourceType === "payment_intent" ? dataObject.id : dataObject.payment_intent;
-
-        console.log(`🔍 Debug Promotion: Searching for Tier ID: ${tierId}, Product ID: ${productId}`);
-
-        const [[tier]] = await connection.query(
-          "SELECT duration_days FROM promotion_tiers WHERE id = ?",
-          [tierId]
-        );
-
-        if (!tier) {
-             throw new Error(`Promotion tier with ID ${tierId} not found.`);
-        }
-
-        // ✅ هذا هو الكود الصحيح الذي طلبته (بدون تعديل جدول المنتجات)
-        await connection.query(
-            `INSERT INTO product_promotions 
-             (product_id, merchant_id, promotion_tier_id, status, stripe_payment_intent_id, start_date, end_date) 
-             VALUES (?, ?, ?, 'active', ?, NOW(), DATE_ADD(NOW(), INTERVAL ? DAY))`,
-            [productId, merchantId, tierId, paymentIntentId, tier.duration_days]
-        );
-
-        console.log(`✅ SUCCESS: Product ${productId} promoted for ${tier.duration_days} days.`);
-    } else if (sessionType === "product_purchase") {
-      const orderPayload = {
-        customerId: Number(dataObject.metadata.userId),
-        cartItems: JSON.parse(dataObject.metadata.cartItems),
-        shippingAddressId: Number(dataObject.metadata.shippingAddressId),
-        shipping_company_id: Number(dataObject.metadata.shipping_company_id),
-        shipping_cost: Number(dataObject.metadata.shipping_cost),
-        paymentMethod: "card",
-        paymentStatus: "paid",
-        stripe_session_id: dataObject.id,
-      };
-      await createOrderInternal(orderPayload, connection);
-      console.log(`📦 Order created for User: ${orderPayload.customerId}`);
-    } else if (sessionType === "agreement_authorization") {
-        const { merchant_id, model_id, product_id, package_tier_id, offer_id } = dataObject.metadata;
-        
-        // تحديد ID العملية
-        const paymentId = sourceType === "payment_intent" ? dataObject.id : dataObject.payment_intent;
-
-        console.log(`🤝 Processing Agreement: Merchant ${merchant_id} -> Model ${model_id}`);
-
-        // تنظيف القيم (Stripe قد يحول null إلى سلسلة نصية "null" أحياناً)
-        const safePackageId = (package_tier_id && package_tier_id !== "null") ? package_tier_id : null;
-        const safeOfferId = (offer_id && offer_id !== "null") ? offer_id : null;
-
-        // الحفظ في قاعدة البيانات
-        await connection.query(
-          `INSERT INTO agreements 
-           (merchant_id, model_id, package_tier_id, offer_id, product_id, status, stripe_payment_intent_id, created_at) 
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, NOW())`,
-          [
-            merchant_id,
-            model_id,
-            safePackageId, // قد يكون null
-            safeOfferId,   // قد يكون null
-            product_id,
-            paymentId,
-          ]
-        );
-        
-        console.log(`✅ Agreement created successfully!`);
-    }
-
-    await connection.commit();
-  } catch (error) {
-    await connection.rollback();
-    console.error(`❌ Transaction Error (${sessionType}):`, error);
-  } finally {
-    connection.release();
-  }
-}
 
 module.exports = {
   // Web

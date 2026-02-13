@@ -4,62 +4,74 @@ const router = express.Router();
 const {
   createAgreement,
   getAgreementRequests,
-  updateAgreementStatus,
   completeAgreementByMerchant,
   getMerchantAgreements,
   createAgreementReview,
   getActiveAgreementsForUser,
-  respondToAgreement, // اسم جديد
-  startAgreementProgress, // جديد
-  deliverAgreement, // جديد
+  respondToAgreement,
+  startAgreementProgress,
+  deliverAgreement,
 } = require("../controllers/agreementController");
+
 const { protect, restrictTo } = require("../middleware/authMiddleware");
 
-// مسار للتاجر لإنشاء اتفاق
+// 1. مسار للتاجر لإنشاء اتفاق
+// (Merchant Only - ID: 2)
 router.post("/", protect, restrictTo(2), createAgreement);
 
-// مسارات للعارضة/المؤثرة لإدارة الطلبات
+// 2. مسارات للعارضة/المؤثرة لجلب الطلبات
+// (Supplier/Model - IDs: 3, 4)
 router.get("/requests", protect, restrictTo(3, 4), getAgreementRequests);
+
+// 3. ✨ الرد على الاتفاق (قبول/رفض) - بديل المسار القديم updateAgreementStatus
+// (Supplier/Model - IDs: 3, 4)
 router.put(
-  "/requests/:id/status",
+  "/:id/respond",
   protect,
   restrictTo(3, 4),
-  updateAgreementStatus
+  respondToAgreement
 );
 
-// --- ✨ المسار الجديد للتاجر لتأكيد اكتمال الاتفاق ✨ ---
+// 4. ✨ بدء التنفيذ (بعد القبول)
+// (Supplier/Model - IDs: 3, 4)
+router.put(
+  "/:id/start",
+  protect,
+  restrictTo(3, 4),
+  startAgreementProgress
+);
+
+// 5. ✨ تسليم العمل (بعد الانتهاء)
+// (Supplier/Model - IDs: 3, 4)
+router.put(
+  "/:id/deliver",
+  protect,
+  restrictTo(3, 4),
+  deliverAgreement
+);
+
+// 6. ✨ مسار للتاجر لتأكيد الاكتمال وتحرير الأموال
+// (Merchant Only - ID: 2)
 router.put(
   "/:id/complete",
   protect,
-  restrictTo(2), // متاح للتاجر فقط
+  restrictTo(2),
   completeAgreementByMerchant
 );
 
-// --- ✨ New route for merchants to view their agreements ---
+// 7. جلب اتفاقيات التاجر
+// (Merchant Only - ID: 2)
 router.get(
   "/my-agreements",
   protect,
-  restrictTo(2), // Merchant only
+  restrictTo(2),
   getMerchantAgreements
 );
 
-router
-  .route('/:id/respond')
-  .put(protect, protect, respondToAgreement); // PENDING -> ACCEPTED/REJECTED
-
-router
-  .route('/:id/start')
-  .put(protect, protect, startAgreementProgress); // ACCEPTED -> IN_PROGRESS
-
-router
-  .route('/:id/deliver')
-  .put(protect, protect, deliverAgreement); // IN_PROGRESS -> DELIVERED
-
-
-// --- (إضافة) مسار جلب الاتفاقيات النشطة للمستخدم الحالي ---
+// 8. جلب الاتفاقيات النشطة للمستخدم الحالي (لأي مستخدم مسجل دخول)
 router.get("/active-for-user", protect, getActiveAgreementsForUser);
-// --- (نهاية الإضافة) ---
 
+// 9. إضافة تقييم
 router.post("/:id/review", protect, createAgreementReview);
 
 module.exports = router;

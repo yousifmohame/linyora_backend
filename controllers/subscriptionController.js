@@ -31,7 +31,7 @@ exports.getSubscriptionPlansForRole = asyncHandler(async (req, res) => {
   const [plans] = await pool.query(
     // 3. استخدام اسم الدور الصحيح في الاستعلام
     "SELECT id, name, description, price, features, includes_dropshipping FROM subscription_plans WHERE role = ? AND is_active = TRUE ORDER BY price ASC",
-    [userRole]
+    [userRole],
   );
 
   const formattedPlans = plans.map((plan) => ({
@@ -45,51 +45,48 @@ exports.getSubscriptionPlansForRole = asyncHandler(async (req, res) => {
   res.json(formattedPlans);
 });
 
-/**
- * @desc    Create a Stripe checkout session for a selected subscription plan
- * @route   POST /api/subscriptions/create-session
- * @access  Private
- */
 exports.createSubscriptionSession = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   if (!stripe)
     return res.status(500).json({ message: "Stripe is not initialized." });
 
   const { planId } = req.body;
-  
-  // التحقق من وجود المستخدم
-  if (!req.user) {
-      return res.status(401).json({ message: "User not authenticated" });
-  }
   const { id: userId, email: userEmail } = req.user;
 
-  // جلب الخطة من قاعدة البيانات
+  // 1. التحقق من الباقة
   const [[plan]] = await pool.query(
     "SELECT * FROM subscription_plans WHERE id = ? AND is_active = TRUE",
-    [planId]
+    [planId],
   );
 
-  if (!plan) {
-    return res
-      .status(404)
-      .json({ message: "لم يتم العثور على باقة الاشتراك." });
+  if (!plan) return res.status(404).json({ message: "الباقة غير موجودة." });
+
+  // 2. إلغاء الاشتراك القديم (كما هو، الكود سليم)
+  const [[activeSub]] = await pool.query(
+    "SELECT stripe_subscription_id FROM user_subscriptions WHERE user_id = ? AND status = 'active'",
+    [userId],
+  );
+
+  if (activeSub && activeSub.stripe_subscription_id) {
+    try {
+      console.log(`🔄 Switching plan: Cancelling old subscription...`);
+      await stripe.subscriptions.cancel(activeSub.stripe_subscription_id);
+      await pool.query(
+        "UPDATE user_subscriptions SET status = 'cancelled' WHERE stripe_subscription_id = ?",
+        [activeSub.stripe_subscription_id],
+      );
+    } catch (stripeError) {
+      console.error(
+        "⚠️ Error cancelling old subscription:",
+        stripeError.message,
+      );
+    }
   }
 
-  // حساب المبلغ بالسنت/الهللة
+  // 3. إنشاء الجلسة
   const unitAmount = Math.round(parseFloat(plan.price) * 100);
-
-  // ✅ التعديل هنا: تجهيز بيانات المنتج بشكل ديناميكي
-  const productData = {
-    name: plan.name,
-  };
-
-  // إضافة الوصف فقط إذا كان موجوداً وغير فارغ
-  if (plan.description && plan.description.trim() !== "") {
-    productData.description = plan.description;
-  }
-  // إذا أردت وصفاً افتراضياً في حال كان فارغاً، يمكنك إلغاء التعليق عن السطر التالي:
-  // else { productData.description = "اشتراك في منصة لينيورا"; }
-
+  const productData = { name: plan.name };
+  if (plan.description) productData.description = plan.description;
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ["card"],
@@ -99,19 +96,30 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
       {
         price_data: {
           currency: "sar",
-          product_data: productData, // ✅ استخدام الكائن المجهز
+          product_data: productData,
           unit_amount: unitAmount,
           recurring: { interval: "month" },
         },
         quantity: 1,
       },
     ],
+    // 🔥🔥🔥 هذا هو الجزء الذي كان ناقصاً في كودك 🔥🔥🔥
+    // هذا يضمن انتقال البيانات إلى كائن "الاشتراك" ليقرأها الويب هوك
+    subscription_data: {
+      metadata: {
+        userId: userId,
+        planId: plan.id,
+        sessionType: "subscription",
+      },
+    },
+    // ----------------------------------------------------
+    // هذه الميتاداتا هنا تخص "الجلسة" فقط (للتتبع في لوحة تحكم Stripe)
     metadata: {
       userId: userId,
       planId: plan.id,
       sessionType: "subscription",
+      action: "plan_switch",
     },
-    // تأكد من أن FRONTEND_URL معرف في ملف .env
     success_url: `${process.env.FRONTEND_URL}/dashboard?subscription_success=true`,
     cancel_url: `${process.env.FRONTEND_URL}/dashboard/subscribe`,
   });
@@ -126,7 +134,7 @@ exports.createSubscriptionSession = asyncHandler(async (req, res) => {
  */
 exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
   console.log(
-    `🔎 [GET /api/subscriptions/status] Checking active subscription for user: ${req.user.id}`
+    `🔎 [GET /api/subscriptions/status] Checking active subscription for user: ${req.user.id}`,
   );
 
   const query = `
@@ -197,7 +205,7 @@ exports.getSubscriptionStatus = asyncHandler(async (req, res) => {
  */
 exports.getSubscriptionHistory = asyncHandler(async (req, res) => {
   console.log(
-    `📜 [GET /api/subscriptions/history] Fetching history for user ID: ${req.user.id}`
+    `📜 [GET /api/subscriptions/history] Fetching history for user ID: ${req.user.id}`,
   );
 
   const [subscriptions] = await pool.query(
@@ -212,7 +220,7 @@ exports.getSubscriptionHistory = asyncHandler(async (req, res) => {
      JOIN subscription_plans sp ON s.plan_id = sp.id
      WHERE s.user_id = ?
      ORDER BY s.start_date DESC`,
-    [req.user.id]
+    [req.user.id],
   );
 
   console.log(`📦 Found ${subscriptions.length} subscription records.`);
@@ -237,7 +245,7 @@ exports.getAllUserSubscriptions = asyncHandler(async (req, res) => {
          JOIN subscription_plans sp ON s.plan_id = sp.id
          WHERE s.user_id = ?
          ORDER BY s.start_date DESC`,
-    [req.user.id]
+    [req.user.id],
   );
 
   res.json(subscriptions);
